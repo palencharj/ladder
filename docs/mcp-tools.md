@@ -85,6 +85,7 @@ Fan out many tasks concurrently, each on its own cheapest tier.
 | `max_rung` | int | 5 | Default ceiling for all tasks. |
 | `verify` | enum | — | Default verifier for all tasks. |
 | `system_extra` | string | — | Shared context appended to every task's system prompt. |
+| `batch` | bool | `false` | Pack compatible tasks into ONE `claude -p` call. The ~35k harness overhead is per invocation, not per task — measured 175k tokens of allowance saved across 6 tasks. Strongly recommended for bulk paid work. |
 | `wait` | bool | `false` | Block for all results, or return a `swarm_id` to poll. |
 
 With `wait: false` you get a `swarm_id` immediately and a summary of the

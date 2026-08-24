@@ -98,9 +98,60 @@ class Swarm:
         finally:
             self.gate.release(rung)
 
+    @staticmethod
+    def _batch_key(task: Task) -> tuple:
+        """Tasks may share an invocation only if they share every setting.
+
+        Batching concatenates prompts under one system prompt and one output
+        budget, so anything that changes those has to split the batch. It also
+        excludes adjudication and escalation, which are per-job decisions a
+        batch cannot make as a unit.
+        """
+        return (task.kind, task.system_extra, task.verify, task.max_tokens,
+                task.model, task.rung, task.tier_name)
+
+    def _try_batch(self, group: list[Task], swarm_id: str) -> tuple[list[dict], list[Task]]:
+        """Batch what can be batched. Returns (results, tasks needing individual runs)."""
+        from .engines.cli_engine import MAX_BATCH
+
+        done: list[dict] = []
+        leftover: list[Task] = []
+
+        buckets: dict[tuple, list[Task]] = {}
+        for t in group:
+            # A task allowed to escalate, or wanting adjudication, must run on
+            # its own -- a batch answers at exactly one rung.
+            if t.adjudicate or (t.max_rung is not None
+                                and t.max_rung > t.start_rung()):
+                leftover.append(t)
+                continue
+            buckets.setdefault(self._batch_key(t), []).append(t)
+
+        for bucket in buckets.values():
+            for i in range(0, len(bucket), MAX_BATCH):
+                chunk = bucket[i:i + MAX_BATCH]
+                if len(chunk) < 2:
+                    leftover.extend(chunk)
+                    continue
+                out = self.router.run_batch(chunk, swarm_id)
+                if out is None:
+                    leftover.extend(chunk)   # fall back, never misalign
+                else:
+                    done.extend(out)
+        return done, leftover
+
     def _drain_group(self, rung: int, group: list[Task], swarm_id: str,
-                     results: list[dict], lock: threading.Lock) -> None:
+                     results: list[dict], lock: threading.Lock,
+                     batch: bool = False) -> None:
         """Run one rung's tasks in a pool sized to that rung's budget."""
+        if batch and rung > 0 and len(group) > 1:
+            batched, group = self._try_batch(group, swarm_id)
+            if batched:
+                with lock:
+                    results.extend(batched)
+            if not group:
+                return
+
         width = min(len(group), max(1, tiers.by_rung(rung).concurrency))
         with ThreadPoolExecutor(max_workers=width) as pool:
             futures = {pool.submit(self._run_one, t, swarm_id): t for t in group}
@@ -111,7 +162,7 @@ class Swarm:
                 with lock:
                     results.append(out)
 
-    def run(self, tasks: list[Task], swarm_id: str) -> dict:
+    def run(self, tasks: list[Task], swarm_id: str, batch: bool = False) -> dict:
         """Execute every task; return per-task results plus a roll-up.
 
         Tasks are partitioned by starting rung and each rung gets its own
@@ -136,7 +187,7 @@ class Swarm:
         threads = [
             threading.Thread(
                 target=self._drain_group,
-                args=(rung, group, swarm_id, results, lock),
+                args=(rung, group, swarm_id, results, lock, batch),
                 daemon=True,
             )
             for rung, group in groups.items()
@@ -155,5 +206,6 @@ class Swarm:
             "failed": len(results) - len(ok),
             "cost_usd": cost,
             "escalations": sum(r.get("escalations", 0) for r in results),
+            "batched": sum(1 for r in results if r.get("batched")),
             "results": results,
         }

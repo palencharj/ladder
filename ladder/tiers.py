@@ -124,6 +124,20 @@ LADDER: tuple[Tier, ...] = (
 
 MAX_RUNG = LADDER[-1].rung
 
+# What one `claude -p` invocation costs before it does any work at all.
+#
+# Measured on 2026-08-24 asking Haiku 4.5 for a one-word reply: 34,054 tokens
+# of cache creation on a cold call, and 9,976 creation + 24,909 read on a warm
+# one. Roughly 35k either way. Stripping settings and MCP config only moved it
+# to ~25k and broke the cache prefix.
+#
+# On API billing this is a money problem. On a subscription it is a *quota*
+# problem, and a much sharper one: the overhead is charged per invocation
+# regardless of how trivial the task is, so a hundred one-line jobs burn ~3.5M
+# tokens of allowance before any real work happens. Every request the local
+# tier absorbs is one that never spends this.
+CLI_OVERHEAD_TOKENS = 35_000
+
 # Default rung per task kind. This encodes the "go as small as possible"
 # policy: if a task kind is mechanical, it starts free and only climbs if it
 # actually fails.

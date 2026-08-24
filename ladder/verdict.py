@@ -1,143 +1,172 @@
 """Is this tool worth running? A judgement, not a scoreboard.
 
 Written to be capable of saying no. A dashboard that can only ever report
-savings is marketing, and the whole premise of the ladder -- spend the least
-that works -- is worthless if you cannot tell when it has stopped working.
+savings is marketing, and the premise of the ladder -- spend the least that
+works -- is worthless if you cannot tell when it has stopped working.
+
+Measured in quota, not dollars
+------------------------------
+On a prepaid Claude Code plan nobody receives a bill, so dollars are the wrong
+unit. The binding constraint is subscription allowance, and the unit that
+consumes it is the **invocation**: every `claude -p` call spends ~35k tokens of
+harness overhead before touching the task, charged per call however trivial the
+work. A hundred one-line jobs burn ~3.5M tokens of allowance on overhead alone.
+
+So the question is not "how much money did this save" but "how many requests
+never had to spend allowance, and what did that cost in wall clock".
 
 The three ways Ladder fails to earn its keep, in order of how often they bite:
 
-1. **No API credential.** Rungs 1-5 fall back to shelling out to `claude -p`,
-   which carries 25-35k tokens of harness overhead per call. Measured: $0.023
-   for a one-word reply, against roughly $0.0005 over the raw API. That is
-   ~40x, and it makes every paid rung worse value than simply asking Claude
-   Code directly. This is nearly always the biggest available lever.
+1. **Nothing gets deflected.** If jobs escalate off the local tier anyway, you
+   waited *and* spent the allowance. Strictly worse than going straight to the
+   CLI. A low deflection rate means `TASK_RUNGS` starts too high, or the local
+   model is not up to the work being sent.
 
-2. **Wall clock nobody was willing to spend.** Rung 0 is free in dollars and
-   expensive in time. Free is only genuinely free if the work ran unattended.
-   The report converts the trade into an implied hourly rate -- dollars avoided
-   per hour of local compute -- and judges that number rather than hiding it.
+2. **Deflection costs more wall clock than it is worth.** Rung 0 is free in
+   quota and expensive in time. That is a fine trade unattended and a bad one
+   with someone waiting, so the report surfaces seconds-per-deflection rather
+   than burying it.
 
-3. **A mistuned policy.** If jobs routinely escalate, the cheap attempt is pure
-   waste: you pay for the failure and then pay again a rung up. A low first-try
-   rate means `TASK_RUNGS` starts too low for the work being sent.
+3. **Wasted local attempts.** Time spent on a local try that failed and
+   escalated anyway is pure loss: the wall clock is gone and the request still
+   spent its allowance.
 """
 
 from __future__ import annotations
 
-# Below this, the free tier is not buying enough to justify a person waiting.
-# Deliberately low: it is the cost of a coffee per hour, not a salary.
-POOR_HOURLY_RATE = 1.0
-GOOD_HOURLY_RATE = 10.0
+# Deflect less than this and the local tier is barely pulling its weight.
+POOR_DEFLECTION_RATE = 0.25
+GOOD_DEFLECTION_RATE = 0.60
+
+# Wall clock per deflected request. Ten minutes of local compute to save one
+# invocation is only sane for unattended batch work.
+SLOW_SECONDS_PER_DEFLECTION = 600
+BRISK_SECONDS_PER_DEFLECTION = 60
 
 # Under this many finished jobs, any conclusion is noise.
 MIN_JOBS_FOR_A_VERDICT = 20
 
-# Escalating more than this fraction of the time means the policy starts too low.
-POOR_FIRST_TRY_RATE = 0.6
+
+def _fmt_tokens(n: float) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(int(n))
 
 
-def assess(report: dict, using_cli_fallback: bool) -> dict:
-    """Turn a report dict into a verdict plus concrete, ranked advice."""
+def assess(report: dict, using_cli_fallback: bool = True) -> dict:
+    """Turn a report into a verdict plus concrete, ranked advice.
+
+    `using_cli_fallback` is accepted for callers that still pass it, but the
+    judgement no longer changes on it: the CLI is the normal paid path on a
+    subscription, not a degraded one.
+    """
     findings: list[str] = []
     actions: list[str] = []
 
-    jobs = report.get("jobs_done", 0)
-    net = report.get("net_saving", 0.0)
-    hours = report.get("local_hours", 0.0)
-    rate = report.get("implied_hourly_rate")
-    first_try = report.get("first_try_rate", 0.0)
-    wasted = report.get("wasted_spend", 0.0)
-    spend = report.get("actual_spend", 0.0)
+    done = report.get("jobs_done", 0)
+    deflected = report.get("requests_deflected", 0)
+    rate = report.get("deflection_rate", 0.0)
+    tokens_saved = report.get("tokens_deflected", 0)
+    tokens_spent = report.get("tokens_spent", 0)
+    multiplier = report.get("quota_multiplier")
+    spd = report.get("seconds_per_deflection")
+    wasted_n = report.get("wasted_local_attempts", 0)
+    wasted_h = report.get("wasted_local_hours", 0.0)
 
-    # ---- the dominant lever, if it applies ----
-    if using_cli_fallback:
-        findings.append(
-            "Paid rungs are running through the `claude -p` fallback, which "
-            "adds 25-35k tokens of harness overhead to every call "
-            "(~$0.023 measured for a one-word reply, vs ~$0.0005 over the raw "
-            "API). Every paid number below is inflated roughly 40x."
-        )
-        actions.append(
-            "Set ANTHROPIC_API_KEY. This is the single highest-value change "
-            "available and it costs nothing to try."
-        )
-
-    # ---- not enough evidence ----
-    if jobs < MIN_JOBS_FOR_A_VERDICT:
+    if done < MIN_JOBS_FOR_A_VERDICT:
         return {
             "verdict": "insufficient-data",
             "headline": (
-                f"Only {jobs} finished job(s). Too little to judge -- come back "
+                f"Only {done} finished job(s). Too little to judge -- come back "
                 f"after ~{MIN_JOBS_FOR_A_VERDICT}."
             ),
             "findings": findings,
-            "actions": actions or [
-                "Run a real batch of work through it, then check again."
-            ],
+            "actions": ["Run a real batch of work through it, then check again."],
         }
 
-    # ---- is it net positive at all? ----
-    if net <= 0:
+    # ---- wasted local effort is worth calling out at any verdict ----
+    if wasted_n and wasted_h > 0.25:
         findings.append(
-            f"Net saving is ${net:.4f}: the cheap tiers avoided less than the "
-            f"failed attempts cost (${wasted:.4f} wasted on attempts that had "
-            "to escalate)."
+            f"{wasted_n} local attempts failed and escalated anyway, burning "
+            f"{wasted_h:.1f}h of wall clock for requests that spent their "
+            "allowance regardless. That time bought nothing."
         )
         actions.append(
-            "Raise the starting rung for whichever kinds escalate most -- see "
-            "the per-kind table. Paying for a doomed cheap attempt first is "
-            "worse than starting one rung up."
+            "Raise the starting rung for the kinds with the worst deflection "
+            "rate below. A local attempt that reliably fails is pure loss."
         )
+
+    # ---- the core judgement ----
+    if rate < POOR_DEFLECTION_RATE:
+        findings.append(
+            f"Only {rate:.0%} of requests were handled locally. The rest spent "
+            "subscription allowance anyway, after waiting for a local attempt "
+            "first -- strictly worse than going straight to the CLI."
+        )
+        actions.insert(0, (
+            "Send more mechanical work: classify, triage, extract, summarize, "
+            "docstring. Those deflect reliably; open-ended implementation does "
+            "not."
+        ))
         verdict = "not-worth-it"
-        headline = "Costing more than it saves."
+        headline = f"Barely deflecting anything ({rate:.0%})."
 
-    # ---- free, but at what wall-clock price? ----
-    elif rate is not None and rate < POOR_HOURLY_RATE and hours > 0.25:
+    elif spd is not None and spd > SLOW_SECONDS_PER_DEFLECTION:
         findings.append(
-            f"The free tier avoided ${net:.4f} in exchange for {hours:.1f} "
-            f"hours of local compute -- an implied ${rate:.2f}/hour. That is "
-            "only a good trade if nobody was waiting on it."
+            f"Deflecting {rate:.0%} of requests, but each one costs "
+            f"{spd / 60:.1f} minutes of local compute. Worth it unattended; "
+            "painful if anyone is waiting."
         )
         actions.append(
-            "Use rung 0 only for unattended batch work. For anything "
-            "interactive, start at rung 1 -- Haiku costs cents and returns in "
-            "seconds."
+            "For short-output work pass model='qwen2.5-coder:3b' -- measured "
+            "1.7s vs 33.8s for the 30B on the same classification."
         )
         actions.append(
-            "For short-output work, pass model='qwen2.5-coder:3b': measured "
-            "1.7s vs 33.8s for the 30B, same answer."
+            "Lower max_tokens on rung-0 jobs. Local deadline and wall clock "
+            "both scale directly with it."
         )
         verdict = "marginal"
-        headline = f"Saving real money (${net:.4f}) but slowly."
-
-    elif first_try < POOR_FIRST_TRY_RATE:
-        findings.append(
-            f"Only {first_try:.0%} of jobs succeed at their starting rung, so "
-            "most work pays for a failed cheap attempt before escalating."
+        headline = (
+            f"{_fmt_tokens(tokens_saved)} tokens of allowance preserved, but slowly."
         )
-        actions.append(
-            "Retune TASK_RUNGS upward for the kinds with the worst first-try "
-            "rate in the per-kind table."
-        )
-        verdict = "marginal"
-        headline = "Working, but the policy starts too low."
 
     else:
         verdict = "worth-it"
-        rate_note = f" at ${rate:.2f}/hour of local compute" if rate else ""
+        mult = f", stretching the plan {multiplier:.1f}x" if multiplier else ""
         headline = (
-            f"Net ${net:.4f} avoided across {jobs} jobs{rate_note}, "
-            f"{first_try:.0%} landing on the first rung."
-        )
-        findings.append(
-            f"Actual spend ${spend:.4f}. Work that finished free would have "
-            f"cost ${report.get('avoided_spend', 0):.4f} at Haiku rates."
+            f"{deflected} of {done} requests never spent allowance "
+            f"({rate:.0%}){mult}."
         )
 
-    if rate is not None and rate >= GOOD_HOURLY_RATE:
+    # ---- always show the arithmetic ----
+    findings.append(
+        f"{_fmt_tokens(tokens_saved)} tokens of allowance not spent "
+        f"({deflected} requests x ~35k harness overhead, plus the work "
+        f"itself). {_fmt_tokens(tokens_spent)} tokens actually spent across "
+        f"{report.get('cli_calls', 0)} CLI calls."
+    )
+    if spd is not None:
         findings.append(
-            f"The free tier is returning ${rate:.2f}/hour of avoided spend, "
-            "which comfortably justifies the wall clock."
+            f"Local compute cost {spd / 60:.1f} min per deflected request "
+            f"({report.get('local_hours', 0):.1f}h total)."
+        )
+
+    # ---- the structural lever, always worth stating ----
+    unbatched = report.get("paid_attempts", 0) - report.get("batched_attempts", 0)
+    if unbatched >= 5:
+        actions.append(
+            f"Batch paid work: pass batch=true to ladder_swarm. {unbatched} paid "
+            f"tasks ran as their own invocation, spending ~"
+            f"{_fmt_tokens(unbatched * 35_000)} tokens on harness overhead alone. "
+            "The overhead is per call, not per task."
+        )
+    if report.get("batch_savings_tokens"):
+        findings.append(
+            f"Batching already saved {_fmt_tokens(report['batch_savings_tokens'])} "
+            f"tokens by answering {report.get('paid_attempts', 0)} tasks in "
+            f"{report.get('cli_calls', 0)} invocations."
         )
 
     return {
@@ -149,58 +178,78 @@ def assess(report: dict, using_cli_fallback: bool) -> dict:
 
 
 def render(report: dict, assessment: dict) -> str:
-    """Human-readable report. Used by the MCP tool and the CLI."""
-    v = assessment["verdict"]
+    """Human-readable report. Used by the MCP tool and the dashboard."""
     banner = {
         "worth-it": "WORTH IT",
         "marginal": "MARGINAL",
         "not-worth-it": "NOT WORTH IT",
         "insufficient-data": "NOT ENOUGH DATA",
-    }[v]
+    }[assessment["verdict"]]
 
     window = (f"last {report['window_days']}d" if report.get("window_days")
               else "all time")
+    mult = report.get("quota_multiplier")
     lines = [
         f"=== Is Ladder worth it? ({window}) ===",
         f"{banner}: {assessment['headline']}",
         "",
-        f"  jobs                {report['jobs_done']} done of {report['jobs']}",
-        f"  actual spend        ${report['actual_spend']:.4f}",
-        f"  avoided spend       ${report['avoided_spend']:.4f}   "
-        "(free rung-0 work, priced at Haiku rates)",
-        f"  wasted on retries   ${report['wasted_spend']:.4f}   "
-        f"({report['wasted_attempts']} failed attempts)",
-        f"  net saving          ${report['net_saving']:.4f}",
-        f"  local compute       {report['local_hours']:.2f} h",
+        "  SUBSCRIPTION ALLOWANCE",
+        f"    requests deflected   {report['requests_deflected']} of "
+        f"{report['jobs_done']}  ({report['deflection_rate']:.0%})",
+        f"    tokens deflected     {_fmt_tokens(report['tokens_deflected'])}   "
+        "(est: ~35k harness per call + the work)",
+        f"    tokens spent         {_fmt_tokens(report['tokens_spent'])}   "
+        f"across {report['cli_calls']} CLI calls",
+        f"    quota multiplier     {f'{mult:.1f}x' if mult else 'n/a'}",
     ]
-    if report.get("implied_hourly_rate") is not None:
+    if report.get("batch_savings_tokens"):
         lines.append(
-            f"  implied rate        ${report['implied_hourly_rate']:.2f}/hour "
-            "of local compute"
+            f"    saved by batching    "
+            f"{_fmt_tokens(report['batch_savings_tokens'])}   "
+            f"({report['paid_attempts']} tasks in {report['cli_calls']} calls)"
         )
-    lines.append(f"  first-try rate      {report['first_try_rate']:.0%}")
+    lines += [
+        "",
+        "  WHAT IT COST",
+        f"    local compute        {report['local_hours']:.2f} h",
+    ]
+    if report.get("seconds_per_deflection") is not None:
+        lines.append(
+            f"    per deflection       {report['seconds_per_deflection'] / 60:.1f} min"
+        )
+    if report.get("wasted_local_attempts"):
+        lines.append(
+            f"    wasted locally       {report['wasted_local_attempts']} attempts, "
+            f"{report['wasted_local_hours']:.2f} h (failed, escalated anyway)"
+        )
 
     if report.get("by_kind"):
-        lines += ["", "  by task kind:"]
+        lines += ["", "  BY TASK KIND"]
         for row in report["by_kind"]:
             lines.append(
-                f"    {row['kind']:<16} {row['n']:>4} jobs  "
-                f"first-try {row['first_try_rate']:.0%}  ${row['cost']:.4f}"
+                f"    {row['kind']:<16} {row['n']:>4} jobs   "
+                f"deflected {row['deflection_rate']:>4.0%}   "
+                f"first-try {row['first_try_rate']:>4.0%}"
             )
 
-    if report.get("by_user") and len(report["by_user"]) > 0:
-        lines += ["", "  by user:"]
+    if report.get("by_user"):
+        lines += ["", "  BY USER"]
         for row in report["by_user"]:
             lines.append(
-                f"    {row['user']:<16} {row['jobs']:>4} jobs  "
-                f"{row['free_jobs']} free  ${row['spend']:.4f}"
+                f"    {row['user']:<16} {row['jobs']:>4} jobs   "
+                f"deflected {row['deflection_rate']:>4.0%}"
             )
 
     if assessment["findings"]:
-        lines += ["", "  what the numbers mean:"]
+        lines += ["", "  WHAT THE NUMBERS MEAN"]
         lines += [f"    - {f}" for f in assessment["findings"]]
     if assessment["actions"]:
-        lines += ["", "  do this next:"]
+        lines += ["", "  DO THIS NEXT"]
         lines += [f"    {i}. {a}" for i, a in enumerate(assessment["actions"], 1)]
 
+    lines += [
+        "",
+        f"  (Notional API-rate equivalent: ${report.get('notional_spend_usd', 0):.4f}. "
+        "On a subscription this is not a bill -- allowance above is the real cost.)",
+    ]
     return "\n".join(lines)

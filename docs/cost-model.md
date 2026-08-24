@@ -28,8 +28,7 @@ deliberately conservative.
 
 This is the single most important cost fact in the project.
 
-Without an `ANTHROPIC_API_KEY`, rungs 1–5 fall back to shelling out to
-`claude -p`. That authenticates against a Claude Code subscription — convenient,
+Rungs 1–5 use `claude -p` unless an `ANTHROPIC_API_KEY` is set. That authenticates against a Claude Code subscription — convenient,
 no key to provision — but every invocation reloads the entire Claude Code
 harness: system prompt, all built-in tool definitions, settings, and project
 context.
@@ -43,7 +42,7 @@ a single word:
 | `claude -p` (warm cache) | 9,976 | 24,909 | 50 | $0.0227 |
 | `claude -p` + `--setting-sources "" --strict-mcp-config` | 25,404 | 0 | 53 | **$0.0517** |
 
-Two things to take from that table.
+Three things to take from that table.
 
 **The overhead is irreducible through the CLI.** The "lean" invocation stripped
 settings, MCP config, and the system prompt, and still carried 25k tokens of
@@ -51,18 +50,32 @@ built-in tool definitions. It also broke the cache prefix, so a single lean call
 cost *more than double* the warm normal one. There is no flag that makes
 `claude -p` cheap for small tasks.
 
-**It dominates at swarm scale.** At $0.023 per call, 100 trivial tasks cost
-**$2.27 before any actual work happens**. The same 100 tasks over the raw API,
-at maybe 500 input and 200 output tokens each, cost about $0.15 — roughly
-**15× less**, and the gap widens the smaller the tasks get.
+**On a prepaid plan this is allowance, not money.** Most teams run Claude Code
+on a subscription, where nobody receives a bill and the binding constraint is
+usage allowance. That makes the overhead sharper, not softer: ~35k tokens are
+charged *per invocation* regardless of task size, so a hundred one-line jobs
+spend ~3.5M tokens of quota before any real work happens. Dollar figures in this
+tool are notional — what the work would have cost at API rates — while
+`ladder_report` measures the thing that actually binds.
 
-So: set an API key if you intend to fan out. `ladder_health` reports which path
-is live, and warns when the fallback is in effect.
+**The overhead is per call, not per task, so batch.** This is the single biggest
+lever available on a subscription. Ten tasks in one invocation spend the fixed
+cost once instead of ten times. Measured here: six classifications answered in
+**one** `claude -p` call, 28,416 tokens spent against roughly 210,000 for six
+separate calls — **175,000 tokens of allowance saved**, all six answers correct.
 
-The CLI engine is still the right tool for a small number of *tool-using* jobs.
-It gets file editing, bash, and search for free, which the raw API engine does
-not. The rule is: raw API for volume, CLI for jobs that need to touch the
-filesystem.
+```
+ladder_swarm(tasks=[...], batch=true)
+```
+
+Batching only groups tasks sharing kind, verify, max_tokens and model, and only
+those with no escalation headroom and no adjudication, since a batch answers at
+exactly one rung. If the reply does not parse into exactly one answer per task
+it falls back to individual calls rather than risk handing task 3's answer to
+task 4.
+
+The CLI engine is also the right tool for *tool-using* jobs: it gets file
+editing, bash, and search for free, which the raw API engine does not.
 
 ## What local inference actually costs you
 

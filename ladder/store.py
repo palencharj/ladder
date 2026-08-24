@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     cost_usd    REAL DEFAULT 0,
     latency_ms  INTEGER DEFAULT 0,
     stop_reason TEXT,
+    batch_size  INTEGER DEFAULT 1,
     created_at  REAL NOT NULL,
     FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
@@ -129,7 +130,11 @@ class Store:
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user)"
                 )
-                self._conn.commit()
+            att = {r["name"] for r in self._conn.execute("PRAGMA table_info(attempts)")}
+            if "batch_size" not in att:
+                self._conn.execute(
+                    "ALTER TABLE attempts ADD COLUMN batch_size INTEGER DEFAULT 1")
+            self._conn.commit()
 
     def reap_stale(self, max_age_seconds: int = STALE_JOB_SECONDS) -> int:
         """Mark long-abandoned `running` jobs as failed. Returns how many."""
@@ -213,12 +218,13 @@ class Store:
             """INSERT INTO attempts (job_id, n, rung, tier, engine, model, ok, text,
                                      error, tokens_in, tokens_out, cache_read,
                                      cache_write, cost_usd, latency_ms, stop_reason,
-                                     created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                     batch_size, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, n, tier.rung, tier.name, res.engine, res.model,
              1 if res.ok else 0, res.text, res.error, res.tokens_in,
              res.tokens_out, res.cache_read, res.cache_write, res.cost_usd,
-             res.latency_ms, res.stop_reason, time.time()),
+             res.latency_ms, res.stop_reason,
+             int((res.raw or {}).get("batched", 1) or 1), time.time()),
         )
 
     def get_job(self, job_id: str) -> dict | None:
@@ -242,97 +248,135 @@ class Store:
         )
 
     def report(self, days: int | None = None) -> dict:
-        """Is this tool actually earning its keep?
+        """Is this tool earning its keep? Measured in quota, not dollars.
 
-        Built to be able to answer "no". Every number here is either measured
-        or a clearly-labelled counterfactual, and the counterfactual is
-        deliberately conservative:
+        On a prepaid Claude Code plan the scarce resource is subscription
+        allowance, not money, so this reports in the units that actually bind:
+        **requests deflected** and **tokens deflected**.
 
-        * **avoided_spend** prices work that finished free at rung 0 using
-          rung 1 rates -- the cheapest paid tier that could have done it. It is
-          not priced at the top rung, because nobody would have run a docstring
-          through Fable. Pricing against the most expensive model is how tools
-          like this flatter themselves.
-        * **wasted_spend** is money spent on attempts that failed and had to
-          escalate. Trying cheap and missing is not free, and a report that
-          hides it is lying.
-        * **local_hours** is wall-clock spent on the free tier. Free is not
-          free if a person sat waiting for it, so the report converts the
-          trade into an implied hourly rate and judges it.
+        The unit that matters is the invocation. Every `claude -p` call spends
+        ~35k tokens of harness overhead before it does any work, charged per
+        call no matter how small the task. So a request the local tier absorbs
+        does not save a fraction of a cent -- it saves an entire ~35k-token hit
+        against the allowance.
 
-        net_saving = avoided_spend - wasted_spend. It can be negative.
+        * **requests_deflected** -- jobs that finished at rung 0 and never
+          invoked the CLI at all. Countable and unambiguous; this is the
+          headline.
+        * **tokens_deflected** -- what those requests would have spent, being
+          the per-call overhead plus the tokens the work itself consumed. An
+          estimate, and stated as one.
+        * **quota_multiplier** -- total requests served divided by requests
+          that actually spent allowance. 2.0 means the plan went twice as far.
+        * **seconds_per_deflection** -- the honest price. Local compute is free
+          in quota and expensive in wall clock, and this is the exchange rate.
+
+        Dollar figures are still recorded, but they are notional on a
+        subscription: what the same work would have cost at API rates, not a
+        bill anyone receives.
         """
         where, params = "", []
         if days:
             where = "WHERE created_at > ?"
             params = [time.time() - days * 86400]
+        and_or_where = "AND" if where else "WHERE"
 
         totals = self._rows(
-            f"""SELECT COUNT(*) jobs, COALESCE(SUM(cost_usd),0) spend,
-                       COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout
+            f"""SELECT COUNT(*) jobs, COALESCE(SUM(cost_usd),0) spend
                 FROM jobs {where}""", tuple(params))[0]
+        done = self._rows(
+            f"""SELECT COUNT(*) n FROM jobs {where} {and_or_where} status='done'""",
+            tuple(params))[0]["n"]
 
         att_where = where.replace("created_at", "a.created_at")
-        # Work that actually completed on the free tier.
-        free = self._rows(
+
+        # Work that completed locally: never touched the subscription.
+        local = self._rows(
             f"""SELECT COUNT(*) n, COALESCE(SUM(a.tokens_in),0) tin,
                        COALESCE(SUM(a.tokens_out),0) tout,
                        COALESCE(SUM(a.latency_ms),0) ms
                 FROM attempts a {att_where}
-                {"AND" if where else "WHERE"} a.rung = 0 AND a.ok = 1""",
+                {and_or_where} a.engine = 'ollama' AND a.ok = 1""",
             tuple(params))[0]
 
-        # Money spent on attempts that did not produce the final answer.
-        wasted = self._rows(
-            f"""SELECT COALESCE(SUM(a.cost_usd),0) c, COUNT(*) n
+        # Attempts that actually spent allowance, and what they cost in tokens.
+        # One batched invocation answers N tasks and is recorded as N attempts,
+        # so counting rows would overstate invocations -- the very thing
+        # batching exists to reduce. Summing 1/batch_size recovers the true
+        # number of `claude -p` calls.
+        paid = self._rows(
+            f"""SELECT COALESCE(SUM(1.0 / MAX(a.batch_size, 1)),0) calls,
+                       COUNT(*) attempts,
+                       COALESCE(SUM(a.tokens_in + a.tokens_out
+                                    + a.cache_read + a.cache_write),0) tok,
+                       COALESCE(SUM(CASE WHEN a.batch_size > 1 THEN 1 ELSE 0 END),0) batched
                 FROM attempts a {att_where}
-                {"AND" if where else "WHERE"} a.ok = 0""", tuple(params))[0]
+                {and_or_where} a.engine != 'ollama'""", tuple(params))[0]
 
-        haiku = tiers.by_rung(1)
-        avoided = tiers.estimate_cost(haiku, free["tin"], free["tout"])
-        net = avoided - wasted["c"]
-        local_hours = free["ms"] / 3_600_000
+        # Local attempts that failed and had to escalate: wall clock spent for
+        # nothing, and the request still cost allowance in the end.
+        wasted_local = self._rows(
+            f"""SELECT COUNT(*) n, COALESCE(SUM(a.latency_ms),0) ms
+                FROM attempts a {att_where}
+                {and_or_where} a.engine = 'ollama' AND a.ok = 0""",
+            tuple(params))[0]
 
-        jobs_by_start = self._rows(
+        jobs_local = self._rows(
+            f"""SELECT COUNT(*) n FROM jobs {where}
+                {and_or_where} status='done' AND final_rung = 0""",
+            tuple(params))[0]["n"]
+
+        deflected_tokens = jobs_local * tiers.CLI_OVERHEAD_TOKENS +             local["tin"] + local["tout"]
+        served = done
+        spent_requests = max(0, served - jobs_local)
+
+        by_kind = self._rows(
             f"""SELECT kind, COUNT(*) n,
-                       SUM(CASE WHEN final_rung = start_rung THEN 1 ELSE 0 END) first_try,
-                       COALESCE(SUM(cost_usd),0) cost
-                FROM jobs {where} {"AND" if where else "WHERE"} status='done'
+                       SUM(CASE WHEN final_rung = 0 THEN 1 ELSE 0 END) local_n,
+                       SUM(CASE WHEN final_rung = start_rung THEN 1 ELSE 0 END) first_try
+                FROM jobs {where} {and_or_where} status='done'
                 GROUP BY kind ORDER BY n DESC""", tuple(params))
-        for row in jobs_by_start:
+        for row in by_kind:
+            row["deflection_rate"] = row["local_n"] / row["n"] if row["n"] else 0.0
             row["first_try_rate"] = row["first_try"] / row["n"] if row["n"] else 0.0
 
         by_user = self._rows(
             f"""SELECT COALESCE(user,'unknown') user, COUNT(*) jobs,
-                       COALESCE(SUM(cost_usd),0) spend,
-                       SUM(CASE WHEN final_rung = 0 THEN 1 ELSE 0 END) free_jobs
+                       SUM(CASE WHEN final_rung = 0 THEN 1 ELSE 0 END) local_jobs,
+                       COALESCE(SUM(cost_usd),0) spend
                 FROM jobs {where} GROUP BY user ORDER BY jobs DESC""",
             tuple(params))
+        for row in by_user:
+            row["deflection_rate"] = (
+                row["local_jobs"] / row["jobs"] if row["jobs"] else 0.0)
 
-        done = self._rows(
-            f"""SELECT COUNT(*) n FROM jobs {where}
-                {"AND" if where else "WHERE"} status='done'""", tuple(params))[0]["n"]
-        first_try = self._rows(
-            f"""SELECT COUNT(*) n FROM jobs {where}
-                {"AND" if where else "WHERE"} status='done'
-                  AND final_rung = start_rung""", tuple(params))[0]["n"]
-
+        local_hours = local["ms"] / 3_600_000
         return {
             "window_days": days,
             "jobs": totals["jobs"],
             "jobs_done": done,
-            "actual_spend": totals["spend"],
-            "free_attempts": free["n"],
-            "free_tokens_in": free["tin"],
-            "free_tokens_out": free["tout"],
-            "avoided_spend": avoided,
-            "wasted_spend": wasted["c"],
-            "wasted_attempts": wasted["n"],
-            "net_saving": net,
+            # --- the metrics that matter on a subscription ---
+            "requests_deflected": jobs_local,
+            "requests_spent": spent_requests,
+            "deflection_rate": (jobs_local / served) if served else 0.0,
+            "tokens_deflected": deflected_tokens,
+            "tokens_spent": paid["tok"],
+            "cli_calls": round(paid["calls"]),
+            "paid_attempts": paid["attempts"],
+            "batched_attempts": paid["batched"],
+            "batch_savings_tokens": max(
+                0, (paid["attempts"] - round(paid["calls"]))
+                * tiers.CLI_OVERHEAD_TOKENS),
+            "quota_multiplier": (served / spent_requests) if spent_requests else None,
+            # --- the price paid for it ---
             "local_hours": local_hours,
-            "implied_hourly_rate": (net / local_hours) if local_hours > 0.01 else None,
-            "first_try_rate": (first_try / done) if done else 0.0,
-            "by_kind": jobs_by_start,
+            "seconds_per_deflection": (
+                (local["ms"] / 1000) / jobs_local if jobs_local else None),
+            "wasted_local_attempts": wasted_local["n"],
+            "wasted_local_hours": wasted_local["ms"] / 3_600_000,
+            # --- notional, on a subscription ---
+            "notional_spend_usd": totals["spend"],
+            "by_kind": by_kind,
             "by_user": by_user,
         }
 

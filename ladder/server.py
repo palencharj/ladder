@@ -168,7 +168,8 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
             for t in raw if t.get("prompt")
         ]
         swarm_id = uuid.uuid4().hex[:12]
-        _spawn(swarm.run, tasks, swarm_id)
+        _spawn(swarm.run, tasks, swarm_id,
+               batch=bool(body.get("batch", False)))
         return jsonify({"swarm_id": swarm_id, "queued": len(tasks)}), 202
 
     @app.get("/api/swarm/<swarm_id>")

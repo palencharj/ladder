@@ -87,9 +87,15 @@ Kind `docstring` → starts at rung 0 → free. If the local model emits somethi
 that will not parse, the `python` verifier catches it and the job climbs to
 rung 1 automatically.
 
-**Bulk work, fanned out:**
+**Bulk work, fanned out — and batched:**
 
-> Use ladder_swarm to write a one-line summary of every file under `src/`.
+> Use ladder_swarm with batch=true to write a one-line summary of every file
+> under `src/`.
+
+`batch: true` packs compatible tasks into a single `claude -p` invocation. Since
+the ~35k harness overhead is charged per *call* rather than per task, this is the
+biggest saving available on a subscription — measured at 175k tokens of
+allowance across six tasks.
 
 Per-tier concurrency caps apply automatically: local jobs run 2 at a time
 because CPU inference is near zero-sum, while Haiku jobs fan out 12-wide.
@@ -181,14 +187,22 @@ default. Run `python scripts/bench.py` to get your own numbers. Under about 10
 tok/s, treat rung 0 as batch work you walk away from, not something a human
 waits on. It is still free, which is the whole point.
 
-**Without an API key, rungs 1–5 get expensive.** They then fall back to
-shelling out to `claude -p`, which authenticates against a Claude Code
-subscription but ships **~25–35k tokens of harness overhead on every single
-call** — measured at ~$0.023 for a one-word reply. Stripping settings and MCP
-config does not fix it; that only moved the overhead from ~35k to ~25k and
-broke the prompt cache, making one call cost *more*. Set `ANTHROPIC_API_KEY`
-and the same work goes over the raw API for a small fraction of that. Details
-and measurements: [`docs/cost-model.md`](docs/cost-model.md).
+**Every `claude -p` call costs ~35k tokens before it does any work.** That is
+the Claude Code harness — system prompt plus tool definitions — reloaded on each
+invocation, measured on this machine. Stripping settings and MCP config does not
+fix it; that only moved it from ~35k to ~25k and broke the prompt cache, making
+one call cost *more*.
+
+On a prepaid plan that overhead is **subscription allowance, not money**, which
+makes it sharper: it is charged per invocation however trivial the task, so a
+hundred one-line jobs burn ~3.5M tokens of quota on overhead alone. Two levers
+follow, and they are the whole point of this tool:
+
+- **Deflect** work to rung 0, where it spends no allowance at all.
+- **Batch** what cannot be deflected. Measured: six classifications in **one**
+  invocation, 175k tokens of allowance saved versus six separate calls.
+
+`ladder_report` measures both. Details: [`docs/cost-model.md`](docs/cost-model.md).
 
 `ladder_health` tells you which path is live at any moment.
 

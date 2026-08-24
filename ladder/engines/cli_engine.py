@@ -7,8 +7,15 @@ this machine at ~$0.023 per call even for a one-word answer. That overhead is
 irreducible -- stripping settings and MCP config only moved it from ~35k to
 ~25k and broke the cache prefix, making a single call cost more.
 
-So: correct for a handful of tool-using jobs, wrong for a swarm. Prefer
-AnthropicEngine whenever a credential is available.
+On API billing that is a money problem. On a prepaid Claude Code plan -- which
+is how most teams run -- it is an *allowance* problem, and a sharper one: the
+overhead is charged per invocation regardless of task size, so a hundred
+one-line jobs spend ~3.5M tokens of quota before any real work happens.
+
+This engine is not a degraded fallback in that setting; it is the normal paid
+path, and the AnthropicEngine is the special case that needs a key. The way to
+economise is not to avoid this engine but to *invoke it less*: deflect what you
+can to rung 0, and batch what you cannot.
 
 The trade it buys you is real: this engine gets file editing, bash, and search
 for free, which the raw API engine does not.
@@ -28,6 +35,54 @@ from .base import Engine, Result, Timer
 HARNESS_OVERHEAD_TOKENS = 35_000
 
 
+# Batching caps. The overhead is per invocation, so bigger batches are always
+# cheaper in allowance -- but a batch that overruns its output budget loses
+# every task in it, so these stay conservative.
+MAX_BATCH = 20
+MAX_BATCH_PROMPT_CHARS = 60_000
+
+BATCH_SYSTEM = (
+    "You will be given several independent tasks in one message. Answer every "
+    "one of them.\n\n"
+    "Return ONLY a JSON array of strings: one element per task, in the order "
+    "given, each element being the complete answer to that task. Return "
+    "nothing outside the array -- no prose, no markdown fence, no commentary. "
+    "The array must have exactly as many elements as there are tasks. If a "
+    "task cannot be answered, still return an element for it explaining why, "
+    "so the positions stay aligned."
+)
+
+
+def build_batch_prompt(prompts: list[str]) -> str:
+    """Pack independent tasks into one message with positional markers."""
+    parts = [f"There are {len(prompts)} tasks. Return a JSON array of "
+             f"{len(prompts)} strings.\n"]
+    for i, p in enumerate(prompts, start=1):
+        parts.append(f"=== TASK {i} ===\n{p}\n")
+    return "\n".join(parts)
+
+
+def parse_batch_reply(text: str, expected: int) -> list[str] | None:
+    """Split a batch reply into per-task answers, or None if unusable.
+
+    Returning None rather than a partial list is deliberate: a misaligned batch
+    would silently hand task 3's answer to task 4, which is far worse than
+    falling back to individual calls.
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        cleaned = "\n".join(lines[1:-1] if lines[-1].strip().startswith("```")
+                            else lines[1:])
+    try:
+        parsed = json.loads(cleaned)
+    except ValueError:
+        return None
+    if not isinstance(parsed, list) or len(parsed) != expected:
+        return None
+    return [x if isinstance(x, str) else json.dumps(x) for x in parsed]
+
+
 class ClaudeCliEngine(Engine):
     name = "cli"
 
@@ -36,6 +91,64 @@ class ClaudeCliEngine(Engine):
         self.cwd = cwd
         self.allowed_tools = allowed_tools
         self.timeout = timeout
+
+    def batchable(self, prompts: list[str]) -> bool:
+        """Is this set of prompts safe to send as one invocation?"""
+        return (
+            1 < len(prompts) <= MAX_BATCH
+            and sum(len(p) for p in prompts) <= MAX_BATCH_PROMPT_CHARS
+        )
+
+    def run_batch(self, tier, system: str, prompts: list[str],
+                  max_tokens: int = 8000) -> list[Result] | None:
+        """Answer many independent tasks in ONE invocation.
+
+        This is the main lever on a subscription. The ~35k harness overhead is
+        charged per call, not per task, so ten tasks in one call spend roughly
+        35k instead of 350k of allowance -- a 10x saving on the fixed cost that
+        has nothing to do with the work itself.
+
+        Returns None when the batch cannot be trusted (unparseable reply, wrong
+        number of answers, engine failure). The caller then falls back to
+        individual calls: slower and dearer, but never misaligned.
+
+        Accounting divides the invocation's real tokens evenly across the
+        tasks, so per-job figures stay comparable with unbatched runs.
+        """
+        if not prompts:
+            return []
+        combined = build_batch_prompt(prompts)
+        # One shared output budget has to cover every answer.
+        budget = min(max_tokens * len(prompts), 32_000)
+
+        res = self.run(tier, f"{system}\n\n{BATCH_SYSTEM}", combined,
+                       max_tokens=budget)
+        if not res.ok:
+            return None
+        answers = parse_batch_reply(res.text, len(prompts))
+        if answers is None:
+            return None
+
+        n = len(prompts)
+        return [
+            Result(
+                text=answer,
+                ok=bool(answer.strip()),
+                engine=self.name,
+                model=res.model,
+                rung=tier.rung,
+                tokens_in=res.tokens_in // n,
+                tokens_out=res.tokens_out // n,
+                cache_read=res.cache_read // n,
+                cache_write=res.cache_write // n,
+                cost_usd=res.cost_usd / n,
+                latency_ms=res.latency_ms // n,
+                stop_reason=res.stop_reason,
+                error="" if answer.strip() else "empty answer in batch",
+                raw={"batched": n},
+            )
+            for answer in answers
+        ]
 
     def available(self) -> tuple[bool, str]:
         exe = shutil.which("claude")

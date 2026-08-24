@@ -22,7 +22,8 @@ import re
 from collections.abc import Callable
 from dataclasses import replace
 
-from . import prompts, tiers
+from . import prompts as prompts_mod
+from . import tiers
 from .engines import AnthropicEngine, ClaudeCliEngine, OllamaEngine, Result
 
 Verifier = Callable[[str], bool]
@@ -108,10 +109,11 @@ class Router:
     def engine_for(self, tier):
         """Pick the engine for a tier, falling back when no credential exists.
 
-        Rungs 1-5 want the raw API. Without a credential that is impossible, so
-        they fall back to the ``claude -p`` CLI, which authenticates against a
-        Claude Code subscription instead. Correct, but far costlier per call
-        because of the harness overhead the CLI ships on every invocation.
+        Rungs 1-5 use the raw API when a credential exists, and otherwise the
+        ``claude -p`` CLI against a Claude Code subscription. On a prepaid plan
+        the CLI is the normal path, not a degraded one -- there is no bill, and
+        the cost that matters is the ~35k tokens of harness overhead each
+        invocation spends from the allowance.
         """
         if tier.engine == "ollama":
             return self._ollama
@@ -169,6 +171,80 @@ class Router:
         passed, reason = adjudication_verdict(res.text)
         return passed, reason, res.cost_usd
 
+    def run_batch(self, tasks: list, swarm_id: str | None = None) -> list[dict] | None:
+        """Answer several same-rung tasks in ONE paid invocation.
+
+        The reason this exists: on a subscription the ~35k harness overhead is
+        charged per `claude -p` call, not per task. Ten tasks answered in one
+        call spend that fixed cost once instead of ten times.
+
+        Returns None when batching is not safe or the reply could not be
+        trusted -- unbatchable engine, too few or too many tasks, unparseable
+        answer, wrong answer count. The caller falls back to individual jobs,
+        which is slower and spends more allowance but is never misaligned.
+
+        Tasks whose output fails their verifier come back with ``ok: False``
+        and no escalation attempted; the caller escalates those individually,
+        because a batch cannot climb as a unit.
+        """
+        if not tasks:
+            return []
+        first = tasks[0]
+        tier = tiers.resolve(kind=first.kind, rung=first.rung,
+                             tier_name=first.tier_name)
+        if tier.engine == "ollama":
+            return None  # local gains nothing: no per-call overhead to amortise
+
+        engine = self.engine_for(tier)
+        if not hasattr(engine, "run_batch"):
+            return None
+        prompts = [t.prompt for t in tasks]
+        if not engine.batchable(prompts):
+            return None
+
+        system = prompts_mod.system_for(first.kind, first.system_extra)
+        results = engine.run_batch(tier, system, prompts,
+                                   max_tokens=first.max_tokens)
+        if results is None:
+            return None
+
+        out: list[dict] = []
+        for task, res in zip(tasks, results, strict=True):
+            checker = self._resolve_verifier(task.verify)
+            if res.ok and checker and not checker(res.text):
+                res.ok = False
+                res.error = f"failed {getattr(checker, '__name__', 'verify')} check"
+
+            job_id = None
+            if self.store:
+                job_id = self.store.create_job(
+                    kind=task.kind, title=task.title or task.prompt[:80],
+                    prompt=task.prompt,
+                    system=prompts_mod.system_for(task.kind, task.system_extra),
+                    start_rung=tier.rung, max_rung=tier.rung,
+                    swarm_id=swarm_id, cwd=self.cwd,
+                )
+                self.store.mark_running(job_id)
+                self.store.add_attempt(job_id, 1, tier, res)
+                self.store.finish_job(
+                    job_id, status="done" if res.ok else "failed",
+                    result=res.text, error=res.error, final_rung=tier.rung)
+
+            out.append({
+                "job_id": job_id, "ok": res.ok, "result": res.text,
+                "error": res.error, "rung": tier.rung, "tier": tier.name,
+                "model": res.model, "cost_usd": res.cost_usd,
+                "escalations": 0, "batched": True,
+                "title": task.title or task.prompt[:60],
+                "trail": [{
+                    "rung": tier.rung, "tier": tier.name, "model": res.model,
+                    "engine": res.engine, "ok": res.ok,
+                    "cost_usd": res.cost_usd, "latency_ms": res.latency_ms,
+                    "error": res.error, "adjudication": "",
+                }],
+            })
+        return out
+
     def run_job(self, *, prompt: str, kind: str = "implement",
                 rung: int | None = None, tier_name: str | None = None,
                 max_rung: int | None = None, system_extra: str = "",
@@ -201,7 +277,7 @@ class Router:
         if model:
             start_tier = replace(start_tier, model=model)
         ceiling = tiers.MAX_RUNG if max_rung is None else max(start_tier.rung, max_rung)
-        system = prompts.system_for(kind, system_extra)
+        system = prompts_mod.system_for(kind, system_extra)
         checker = self._resolve_verifier(verify)
 
         if self.store and not job_id:

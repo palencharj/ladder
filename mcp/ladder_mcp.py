@@ -137,6 +137,7 @@ TOOLS = [
                 "verify": {"type": "string", "enum": ["python", "json", "nonempty"]},
                 "adjudicate": {"type": "boolean", "description": "Have the next rung up check the answer before accepting it. Structural verifiers catch malformed output but not WRONG output -- a small local model will return well-formed JSON with a wrong number in it and the 'json' verify passes. Adjudication costs one small call at the rung above (far less than running the whole task there) and escalates if the answer is rejected. Use it whenever a cheap tier's answer has to be right rather than merely well-formed."},
                 "system_extra": {"type": "string"},
+                "batch": {"type": "boolean", "description": "Pack compatible tasks into ONE `claude -p` invocation instead of one per task. The ~35k harness overhead is charged per invocation, not per task, so 10 batched tasks spend it once instead of ten times. Measured: 6 classifications in 1 call, 175k tokens of allowance saved. Only tasks sharing kind/verify/max_tokens/model batch together, and only those with no escalation headroom and no adjudication -- a batch answers at exactly one rung. Falls back to individual calls if the batched reply cannot be parsed, so answers are never misaligned. Strongly recommended for bulk paid work on a subscription."},
                 "wait": {"type": "boolean", "description": "Block until every task finishes and return all results. Default false (returns a swarm_id to poll)."},
             },
             "required": ["tasks"],
@@ -178,13 +179,16 @@ TOOLS = [
     {
         "name": "ladder_report",
         "description": (
-            "Is this tool actually worth running? Returns a verdict -- worth-it, "
-            "marginal, or not-worth-it -- with the numbers behind it and ranked "
-            "actions. Unlike ladder_stats it prices avoided work at the CHEAPEST "
-            "paid tier rather than the most expensive, subtracts money wasted on "
-            "failed cheap attempts, and charges the free tier for the wall clock "
-            "it consumed. It can and will conclude the tool is not paying for "
-            "itself. Includes per-user and per-task-kind breakdowns."
+            "Is this tool actually worth running? Measured in SUBSCRIPTION "
+            "ALLOWANCE, not dollars: how many requests never had to invoke the "
+            "CLI at all, and how many tokens that avoided. Every `claude -p` "
+            "call spends ~35k tokens of harness overhead before doing any work, "
+            "charged per invocation however small the task, so each request the "
+            "local tier absorbs saves a whole ~35k hit. Reports deflection rate, "
+            "tokens deflected, quota multiplier, and the wall-clock price paid "
+            "for it. Returns a verdict -- worth-it, marginal, or not-worth-it -- "
+            "and will genuinely conclude the tool is not earning its keep. "
+            "Per-user and per-task-kind breakdowns included."
         ),
         "inputSchema": {
             "type": "object",
@@ -239,9 +243,10 @@ def t_health(_args: dict) -> dict:
     lines.append(f"  paid rungs (1-5) will use: {h['effective_paid_engine']}")
     if h["effective_paid_engine"] == "cli":
         lines.append(
-            "  NOTE: the CLI fallback adds ~25-35k tokens of harness overhead "
-            "per call (~$0.02+ even for trivial work). Set ANTHROPIC_API_KEY "
-            "to make rungs 1-5 dramatically cheaper."
+            "  NOTE: each `claude -p` call carries ~35k tokens of harness "
+            "overhead, charged per invocation however small the task. On a "
+            "subscription that is allowance, not money. Deflecting requests to "
+            "rung 0 is what preserves it -- see ladder_report."
         )
     return {"text": "\n".join(lines), "data": h}
 
@@ -316,7 +321,8 @@ def t_swarm(args: dict) -> dict:
         import threading
 
         threading.Thread(
-            target=_swarm.run, args=(tasks, swarm_id), daemon=True
+            target=_swarm.run, args=(tasks, swarm_id),
+            kwargs={"batch": bool(args.get("batch", False))}, daemon=True
         ).start()
         by_rung: dict[int, int] = {}
         for t in tasks:
@@ -330,11 +336,11 @@ def t_swarm(args: dict) -> dict:
             f"Poll with ladder_status(swarm_id='{swarm_id}')."
         )}
 
-    res = _swarm.run(tasks, swarm_id)
+    res = _swarm.run(tasks, swarm_id, batch=bool(args.get("batch", False)))
     lines = [
         f"swarm {swarm_id}: {res['succeeded']}/{res['total']} ok, "
         f"{res['failed']} failed, {res['escalations']} escalations, "
-        f"${res['cost_usd']:.5f}",
+        f"{res.get('batched', 0)} batched, ${res['cost_usd']:.5f}",
         "",
     ]
     for r in res["results"]:

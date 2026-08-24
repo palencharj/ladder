@@ -599,11 +599,13 @@ def test_adjudication_cost_is_counted(store):
 # --------------------------------------------------------------------------
 
 BASE_REPORT = {
-    "window_days": None, "jobs": 100, "jobs_done": 100, "actual_spend": 1.0,
-    "free_attempts": 50, "free_tokens_in": 100_000, "free_tokens_out": 50_000,
-    "avoided_spend": 2.0, "wasted_spend": 0.1, "wasted_attempts": 5,
-    "net_saving": 1.9, "local_hours": 0.1, "implied_hourly_rate": 19.0,
-    "first_try_rate": 0.95, "by_kind": [], "by_user": [],
+    "window_days": None, "jobs": 100, "jobs_done": 100,
+    "requests_deflected": 80, "requests_spent": 20, "deflection_rate": 0.80,
+    "tokens_deflected": 2_900_000, "tokens_spent": 700_000, "cli_calls": 20,
+    "quota_multiplier": 5.0, "local_hours": 0.5, "seconds_per_deflection": 22.5,
+    "wasted_local_attempts": 0, "wasted_local_hours": 0.0,
+    "notional_spend_usd": 1.0, "by_kind": [], "by_user": [],
+    "paid_attempts": 20, "batched_attempts": 0, "batch_savings_tokens": 0,
 }
 
 
@@ -612,58 +614,78 @@ def _report(**over):
 
 
 def test_verdict_can_say_not_worth_it():
+    """Deflecting nothing means you waited AND spent the allowance."""
     from ladder import verdict
 
-    a = verdict.assess(_report(net_saving=-0.5, wasted_spend=2.0), False)
+    a = verdict.assess(_report(deflection_rate=0.05, requests_deflected=5))
     assert a["verdict"] == "not-worth-it"
     assert a["actions"], "a negative verdict must come with something to do"
 
 
-def test_verdict_flags_slow_free_tier_as_marginal():
-    """Free is not free if a person waited for it."""
+def test_verdict_flags_slow_deflection_as_marginal():
     from ladder import verdict
 
-    a = verdict.assess(
-        _report(net_saving=0.02, local_hours=5.0, implied_hourly_rate=0.004), False)
+    a = verdict.assess(_report(seconds_per_deflection=1800))
     assert a["verdict"] == "marginal"
-    assert any("unattended" in x for x in a["actions"])
+    assert any("3b" in x for x in a["actions"])
 
 
-def test_verdict_flags_a_mistuned_policy():
+def test_verdict_says_worth_it_when_deflection_is_cheap_and_common():
     from ladder import verdict
 
-    a = verdict.assess(_report(first_try_rate=0.2), False)
-    assert a["verdict"] == "marginal"
-    assert any("TASK_RUNGS" in x for x in a["actions"])
-
-
-def test_verdict_says_worth_it_when_it_is():
-    from ladder import verdict
-
-    assert verdict.assess(_report(), False)["verdict"] == "worth-it"
+    assert verdict.assess(_report())["verdict"] == "worth-it"
 
 
 def test_verdict_refuses_to_judge_on_thin_data():
     from ladder import verdict
 
-    a = verdict.assess(_report(jobs_done=3), False)
-    assert a["verdict"] == "insufficient-data"
+    assert verdict.assess(_report(jobs_done=3))["verdict"] == "insufficient-data"
 
 
-def test_cli_fallback_is_called_out_as_the_top_lever():
+def test_verdict_reports_allowance_not_dollars():
+    """On a subscription, dollars are notional; tokens are the real cost."""
     from ladder import verdict
 
-    a = verdict.assess(_report(), using_cli_fallback=True)
-    assert "ANTHROPIC_API_KEY" in a["actions"][0], "must be ranked first"
+    rep = _report()
+    text = verdict.render(rep, verdict.assess(rep))
+    assert "tokens deflected" in text
+    assert "quota multiplier" in text
+    assert "not a bill" in text
+
+
+def test_verdict_calls_out_wasted_local_effort():
+    from ladder import verdict
+
+    a = verdict.assess(_report(wasted_local_attempts=9, wasted_local_hours=2.0))
+    assert any("bought nothing" in f for f in a["findings"])
+
+
+def test_verdict_recommends_batching_when_cli_calls_pile_up():
+    """The ~35k overhead is per invocation, so fewer larger calls win."""
+    from ladder import verdict
+
+    a = verdict.assess(_report(paid_attempts=40, batched_attempts=0))
+    assert any("batch=true" in x for x in a["actions"])
+
+
+def test_verdict_credits_batching_that_already_happened():
+    from ladder import verdict
+
+    a = verdict.assess(_report(paid_attempts=20, batched_attempts=20,
+                               cli_calls=2, batch_savings_tokens=630_000))
+    assert any("Batching already saved" in f for f in a["findings"])
+    assert not any("batch=true" in x for x in a["actions"]),         "must not nag about batching that is already happening"
 
 
 def test_render_never_crashes_on_any_verdict():
     from ladder import verdict
 
-    for over in ({}, {"net_saving": -1.0}, {"jobs_done": 1},
-                 {"implied_hourly_rate": None}, {"first_try_rate": 0.1}):
+    for over in ({}, {"deflection_rate": 0.0, "requests_deflected": 0},
+                 {"jobs_done": 1}, {"seconds_per_deflection": None},
+                 {"quota_multiplier": None}, {"wasted_local_attempts": 3,
+                                              "wasted_local_hours": 1.0}):
         rep = _report(**over)
-        assert verdict.render(rep, verdict.assess(rep, False))
+        assert verdict.render(rep, verdict.assess(rep))
 
 
 # --------------------------------------------------------------------------
@@ -701,16 +723,179 @@ def test_jobs_record_a_user(store):
     assert store.get_job(job_id)["user"] == current_user()
 
 
-def test_report_prices_avoided_work_at_the_cheapest_paid_tier(store):
-    """Not at the most expensive -- nobody would run a docstring through Fable."""
+def test_report_counts_deflected_requests_and_tokens(store):
+    """Every locally-completed request avoids a ~35k-token harness hit."""
     eng = FakeEngine(succeed_at_rung=0)
-    r = router_with(eng, store=store)
+
+    class LocalEngine(FakeEngine):
+        def run(self, tier, system, prompt, max_tokens=8000):
+            res = super().run(tier, system, prompt, max_tokens)
+            res.engine = "ollama"
+            return res
+
+    r = router_with(LocalEngine(), store=store)
     for _ in range(3):
         r.run_job(prompt="p", kind="classify")
 
     rep = store.report()
-    haiku = tiers.by_name("haiku")
-    expected = tiers.estimate_cost(haiku, rep["free_tokens_in"], rep["free_tokens_out"])
-    assert rep["avoided_spend"] == pytest.approx(expected)
-    assert rep["avoided_spend"] < tiers.estimate_cost(
-        tiers.by_name("fable"), rep["free_tokens_in"], rep["free_tokens_out"])
+    assert rep["requests_deflected"] == 3
+    assert rep["deflection_rate"] == 1.0
+    assert rep["tokens_deflected"] >= 3 * tiers.CLI_OVERHEAD_TOKENS
+    assert rep["cli_calls"] == 0
+    assert eng is not None
+
+
+# --------------------------------------------------------------------------
+# Batching
+#
+# The ~35k harness overhead is charged per `claude -p` invocation, not per
+# task. On a subscription that overhead is allowance, so packing many tasks
+# into one call is the single biggest lever available. Measured live: 6
+# classifications in 1 invocation, 175k tokens of allowance saved.
+# --------------------------------------------------------------------------
+
+def test_batch_prompt_numbers_every_task():
+    from ladder.engines.cli_engine import build_batch_prompt
+
+    text = build_batch_prompt(["alpha", "bravo", "charlie"])
+    assert "3 tasks" in text
+    for n in (1, 2, 3):
+        assert f"=== TASK {n} ===" in text
+
+
+def test_batch_reply_parsing_is_strict_about_alignment():
+    from ladder.engines.cli_engine import parse_batch_reply
+
+    assert parse_batch_reply('["a","b","c"]', 3) == ["a", "b", "c"]
+    assert parse_batch_reply('```json\n["a","b"]\n```', 2) == ["a", "b"]
+    # A short or long array would silently shift answers onto the wrong tasks.
+    assert parse_batch_reply('["a","b"]', 3) is None
+    assert parse_batch_reply('["a","b","c","d"]', 3) is None
+    assert parse_batch_reply("not json at all", 2) is None
+    assert parse_batch_reply('{"a": 1}', 2) is None
+
+
+def test_batchable_rejects_singletons_and_oversized_sets():
+    from ladder.engines.cli_engine import MAX_BATCH, ClaudeCliEngine
+
+    eng = ClaudeCliEngine()
+    assert not eng.batchable(["only one"])
+    assert eng.batchable(["a", "b"])
+    assert not eng.batchable(["x"] * (MAX_BATCH + 1))
+    assert not eng.batchable(["x" * 40_000, "y" * 40_000])
+
+
+class BatchEngine(FakeEngine):
+    """Records how many invocations happened, batched or not."""
+
+    def __init__(self):
+        super().__init__(succeed_at_rung=0)
+        self.invocations = 0
+
+    def batchable(self, prompts):
+        return len(prompts) > 1
+
+    def run(self, tier, system, prompt, max_tokens=8000):
+        self.invocations += 1
+        return super().run(tier, system, prompt, max_tokens)
+
+    def run_batch(self, tier, system, prompts, max_tokens=8000):
+        self.invocations += 1
+        return [
+            Result(text=f"answer {i}", ok=True, engine="cli", model=tier.model,
+                   rung=tier.rung, tokens_in=10, tokens_out=10,
+                   raw={"batched": len(prompts)})
+            for i, _ in enumerate(prompts)
+        ]
+
+
+def test_batching_collapses_many_tasks_into_one_invocation(store):
+    eng = BatchEngine()
+    sw = Swarm(router_with(eng, store=store))
+    tasks = [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1) for i in range(8)]
+
+    res = sw.run(tasks, "s-batch", batch=True)
+    assert res["succeeded"] == 8
+    assert eng.invocations == 1, "8 tasks must cost one invocation, not eight"
+    assert res["batched"] == 8
+
+
+def test_without_batching_each_task_is_its_own_invocation(store):
+    eng = BatchEngine()
+    sw = Swarm(router_with(eng, store=store))
+    tasks = [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1) for i in range(8)]
+
+    sw.run(tasks, "s-nobatch", batch=False)
+    assert eng.invocations == 8
+
+
+def test_local_tier_is_never_batched(store):
+    """Rung 0 has no per-call overhead to amortise, and one shared budget
+    would only make a slow tier slower."""
+    eng = BatchEngine()
+    sw = Swarm(router_with(eng, store=store))
+    tasks = [Task(prompt=f"t{i}", kind="classify") for i in range(6)]
+
+    sw.run(tasks, "s-local", batch=True)
+    assert eng.invocations == 6
+
+
+def test_tasks_with_escalation_headroom_are_not_batched(store):
+    """A batch answers at exactly one rung, so it cannot climb."""
+    eng = BatchEngine()
+    sw = Swarm(router_with(eng, store=store))
+    tasks = [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=4) for i in range(5)]
+
+    sw.run(tasks, "s-esc", batch=True)
+    assert eng.invocations == 5
+
+
+def test_adjudicated_tasks_are_not_batched(store):
+    eng = BatchEngine()
+    sw = Swarm(router_with(eng, store=store))
+    tasks = [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1, adjudicate=True)
+             for i in range(4)]
+
+    sw.run(tasks, "s-adj", batch=True)
+    assert eng.invocations == 4
+
+
+def test_incompatible_tasks_split_into_separate_batches(store):
+    eng = BatchEngine()
+    sw = Swarm(router_with(eng, store=store))
+    tasks = ([Task(prompt=f"a{i}", kind="doc", rung=1, max_rung=1) for i in range(3)]
+             + [Task(prompt=f"b{i}", kind="doc", rung=1, max_rung=1,
+                     max_tokens=99) for i in range(3)])
+
+    sw.run(tasks, "s-split", batch=True)
+    assert eng.invocations == 2, "differing max_tokens cannot share one budget"
+
+
+def test_unparseable_batch_falls_back_to_individual_calls(store):
+    """Never guess at alignment: a bad batch reply must not shift answers."""
+
+    class BadBatch(BatchEngine):
+        def run_batch(self, tier, system, prompts, max_tokens=8000):
+            self.invocations += 1
+            return None
+
+    eng = BadBatch()
+    sw = Swarm(router_with(eng, store=store))
+    tasks = [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1) for i in range(4)]
+
+    res = sw.run(tasks, "s-fallback", batch=True)
+    assert res["succeeded"] == 4, "fallback must still answer every task"
+    assert eng.invocations == 5, "1 failed batch + 4 individual retries"
+
+
+def test_report_counts_invocations_not_batched_attempts(store):
+    """Counting attempt rows would overstate the very thing batching reduces."""
+    eng = BatchEngine()
+    Swarm(router_with(eng, store=store)).run(
+        [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1) for i in range(10)],
+        "s-count", batch=True)
+
+    rep = store.report()
+    assert rep["paid_attempts"] == 10
+    assert rep["cli_calls"] == 1
+    assert rep["batch_savings_tokens"] == 9 * tiers.CLI_OVERHEAD_TOKENS
