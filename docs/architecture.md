@@ -56,6 +56,27 @@ means the output must parse as Python; a local model that emits a truncated
 function fails the check and the job climbs automatically. Without a verifier,
 "success" only means the engine returned some text.
 
+**Verifiers are structural, and that is a real limit.** They check that output
+is well-formed, never that it is correct. Observed live: a 3B returned valid
+JSON asserting `"charlie": 6` (it has 7 characters). The `json` verifier passed
+it and the job was recorded as a rung-0 success carrying a wrong answer. This is
+the most dangerous failure mode in the design, precisely because it is silent —
+a crash would have been safer.
+
+`adjudicate=True` closes the gap by asking the tier one rung up whether the
+answer actually satisfies the task, escalating on rejection. Two deliberate
+asymmetries in `Router._adjudicate`:
+
+- The adjudicator is instructed to answer FAIL when unsure. A wrong answer that
+  ships costs far more than one extra retry.
+- A *broken* adjudicator passes by default. If the checker itself is failing,
+  that is an infrastructure problem, and escalating every job would silently
+  convert it into a spending problem.
+
+The check reads an answer rather than producing one, so it costs a small
+fraction of running the task at the higher rung. That asymmetry is what makes
+"cheap tier does the work, dearer tier rules on it" the best value in the tool.
+
 ### `ladder/pool.py` — the swarm
 
 Per-tier semaphores rather than one global limit, because the rungs scale
