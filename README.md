@@ -159,6 +159,33 @@ and measurements: [`docs/cost-model.md`](docs/cost-model.md).
 
 `ladder_health` tells you which path is live at any moment.
 
+## Troubleshooting
+
+**"Server 'ladder' is defined in multiple scopes."** Expected if you both
+cloned the repo (which ships a project-scope `.mcp.json`) and ran
+`claude mcp add --scope user`. Harmless here — the warning is about OAuth
+token storage, and this is a local stdio server with no authentication. The
+user-scope entry wins. To silence it, drop whichever you do not want:
+
+```bash
+claude mcp remove ladder -s project   # keep the global registration
+```
+
+Register at user scope if you want the tools in every project; rely on the
+checked-in `.mcp.json` if you only want them when working in this repo.
+
+**Rungs 1–5 cost far more than the rate card.** You have no
+`ANTHROPIC_API_KEY`, so they are falling back to the `claude -p` CLI. Run
+`ladder_health` to confirm, and see [`docs/cost-model.md`](docs/cost-model.md).
+
+**Rung 0 jobs fail or hang.** Check Ollama is up (`ollama list`) and that the
+rung-0 model is pulled. A cold model load adds tens of seconds to the first
+call. `ladder_health` lists the models it can see.
+
+**Everything local is unbearably slow.** Run `python scripts/bench.py`. If
+generation is under ~10 tok/s you are on CPU inference — that is expected and
+not a bug. Use rung 0 for batch work, not for anything interactive.
+
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit, and why
