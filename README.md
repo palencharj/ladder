@@ -221,6 +221,23 @@ claude mcp remove ladder -s project   # keep the global registration
 Register at user scope if you want the tools in every project; rely on the
 checked-in `.mcp.json` if you only want them when working in this repo.
 
+**You edited the MCP server and nothing changed.** The server is a
+long-running process started when Claude Code connected, so it keeps running
+the code it was launched with. Restart Claude Code to pick up edits to anything
+under `ladder/` or `mcp/`.
+
+This bites hardest when you are testing a fix through the tool itself: the call
+succeeds, the old behaviour persists, and it looks like the fix did not work.
+`python scripts/check_mcp.py` spawns a fresh server, so use that to check a
+change before concluding anything.
+
+**A call succeeded but ran on the wrong tier.** Since v0.1.1 unknown arguments
+are rejected with a message naming what is accepted. Before that they were
+silently dropped — a `ladder_swarm` call passing a top-level `rung` reported
+success while running every task on its kind's default rung instead. If you are
+on an older build, check the `by_kind` deflection column in `ladder_report`
+against what you expected.
+
 **Rungs 1–5 cost far more than the rate card.** You have no
 `ANTHROPIC_API_KEY`, so they are falling back to the `claude -p` CLI. Run
 `ladder_health` to confirm, and see [`docs/cost-model.md`](docs/cost-model.md).
