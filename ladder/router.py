@@ -65,6 +65,33 @@ VERIFIERS: dict[str, Verifier] = {
     "nonempty": nonempty,
 }
 
+# Adjudication prompt. Deliberately asks for a verdict token first so the
+# answer can be parsed from a very short generation, and deliberately tells the
+# adjudicator that rejecting is cheap -- a false PASS silently ships a wrong
+# answer, while a false FAIL only costs one more rung.
+ADJUDICATOR_SYSTEM = (
+    "You check whether a proposed answer actually satisfies a task. "
+    "Reply with exactly PASS or FAIL as the first word, then one short "
+    "sentence of justification. Judge correctness and completeness, not style "
+    "or formatting. Verify any arithmetic, counting, or factual claim yourself "
+    "rather than assuming it is right. If you are unsure, answer FAIL -- a "
+    "wrong answer that ships is far more expensive than one extra retry."
+)
+
+ADJUDICATOR_MAX_TOKENS = 200
+
+
+def adjudication_verdict(text: str) -> tuple[bool, str]:
+    """Parse an adjudicator reply into (passed, reason).
+
+    Anything that is not a clear PASS counts as a failure, so a malformed or
+    empty adjudication escalates rather than silently approving.
+    """
+    stripped = text.strip().lstrip("*# ").upper()
+    if stripped.startswith("PASS"):
+        return True, text.strip()[:200]
+    return False, text.strip()[:200] or "adjudicator returned nothing"
+
 
 class Router:
     """Owns the engines and executes the escalation loop for a single job."""
@@ -120,16 +147,47 @@ class Router:
             return verify
         return None
 
+    def _adjudicate(self, rung: int, prompt: str, answer: str) -> tuple[bool, str, float]:
+        """Ask the tier at `rung` whether `answer` actually satisfies `prompt`.
+
+        Returns (passed, reason, cost). A failed adjudication call passes by
+        default: if the checker itself is broken, escalating every job would
+        turn an infrastructure problem into a spending problem.
+        """
+        tier = tiers.by_rung(rung)
+        check_prompt = (
+            f"TASK:\n{prompt}\n\n"
+            f"PROPOSED ANSWER:\n{answer}\n\n"
+            "Does the proposed answer correctly and completely satisfy the task?"
+        )
+        res = self.engine_for(tier).run(
+            tier, ADJUDICATOR_SYSTEM, check_prompt,
+            max_tokens=ADJUDICATOR_MAX_TOKENS,
+        )
+        if not res.ok:
+            return True, f"adjudicator unavailable ({res.error[:80]})", res.cost_usd
+        passed, reason = adjudication_verdict(res.text)
+        return passed, reason, res.cost_usd
+
     def run_job(self, *, prompt: str, kind: str = "implement",
                 rung: int | None = None, tier_name: str | None = None,
                 max_rung: int | None = None, system_extra: str = "",
                 verify: str | Verifier | None = None, max_tokens: int = 8000,
                 title: str = "", swarm_id: str | None = None,
-                job_id: str | None = None, model: str | None = None) -> dict:
+                job_id: str | None = None, model: str | None = None,
+                adjudicate: bool = False) -> dict:
         """Run one task, escalating on failure. Returns a compact result dict.
 
         The dict deliberately carries only the final text plus accounting --
         never the full transcript. Detail lives in the store.
+
+        ``adjudicate`` has the next rung up check each answer before it is
+        accepted. Structural verifiers catch malformed output but not wrong
+        output -- a 3B will happily return well-formed JSON claiming "charlie"
+        has 6 characters, and the ``json`` verifier passes it. Adjudication
+        costs one small call at the rung above, which is far cheaper than
+        running the whole task there, and is the intended way to trust cheap
+        tiers on work that has to be right.
 
         ``model`` swaps the model at the *starting* rung only, keeping that
         rung's engine, pricing, and concurrency budget. It exists so a caller
@@ -170,12 +228,27 @@ class Router:
                 res.ok = False
                 res.error = f"failed {getattr(checker, '__name__', 'verify')} check"
 
+            # Structural verifiers only check shape. A cheap model can return
+            # perfectly-formed JSON with a wrong number in it, and the job would
+            # be recorded as a success. Adjudication asks the next rung up
+            # whether the answer is actually right.
+            adjudication = ""
+            if res.ok and adjudicate and tier.rung < ceiling:
+                passed, reason, cost = self._adjudicate(
+                    tier.rung + 1, prompt, res.text)
+                res.cost_usd += cost
+                adjudication = reason
+                if not passed:
+                    res.ok = False
+                    res.error = f"rejected by rung {tier.rung + 1} adjudicator: {reason}"
+
             if self.store and job_id:
                 self.store.add_attempt(job_id, n, tier, res)
             trail.append({
                 "rung": tier.rung, "tier": tier.name, "model": res.model,
                 "engine": res.engine, "ok": res.ok, "cost_usd": res.cost_usd,
                 "latency_ms": res.latency_ms, "error": res.error,
+                "adjudication": adjudication,
             })
 
             if res.ok:

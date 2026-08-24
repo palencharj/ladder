@@ -49,6 +49,7 @@ class Task:
     verify: Any = None
     max_tokens: int = 8000
     model: str | None = None
+    adjudicate: bool = False
 
     def start_rung(self) -> int:
         return tiers.resolve(kind=self.kind, rung=self.rung,
@@ -89,6 +90,7 @@ class Swarm:
                 system_extra=task.system_extra, verify=task.verify,
                 max_tokens=task.max_tokens, title=task.title,
                 swarm_id=swarm_id, model=task.model,
+                adjudicate=task.adjudicate,
             )
         except Exception as exc:  # noqa: BLE001 - one task must not kill the swarm
             return {"ok": False, "result": "", "error": f"{type(exc).__name__}: {exc}",

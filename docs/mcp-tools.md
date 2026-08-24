@@ -52,7 +52,8 @@ Run one task on the cheapest tier that can do it.
 | `tier` | string | — | Force a tier by name. Overrides `rung` and `kind`. |
 | `model` | string | tier default | Swap the model at the starting rung only. `qwen2.5-coder:3b` classifies in ~1.7s vs ~34s for the 30B default. |
 | `max_rung` | int | 5 | Escalation ceiling. Set equal to the start rung to forbid escalation. |
-| `verify` | enum | — | `python`, `json`, or `nonempty`. Failure escalates one rung. |
+| `verify` | enum | — | `python`, `json`, or `nonempty`. Structural only — checks form, never correctness. Failure escalates one rung. |
+| `adjudicate` | bool | `false` | Have the next rung up check the answer is *right*, and escalate if not. One small call; the only thing that catches semantically wrong output. |
 | `system_extra` | string | — | Appended to the system prompt. Project conventions go here. |
 | `max_tokens` | int | 8000 | Output cap. Use ~256 for classification. |
 | `title` | string | prompt prefix | Label for the dashboard. |
@@ -179,6 +180,17 @@ the failures reach Haiku.
 ```
 ladder_swarm(tasks=[...], rung=0, max_rung=1, verify="python")
 ```
+
+**Cheap work, checked by a smarter rung.** The highest-leverage pattern in the
+tool. Local does the generation for free; Haiku only reads the answer and rules
+on it, which is a fraction of the tokens of doing the task itself.
+
+```
+ladder_swarm(tasks=[...], rung=0, max_rung=1, verify="json", adjudicate=true)
+```
+
+Anything the local model gets right stays free. Anything it gets wrong is
+caught and redone one rung up, rather than silently shipping.
 
 **Budget-capped experiment.** Run a large swarm at `max_rung: 0` first. It
 cannot cost anything, and the failure rate tells you how much of the batch

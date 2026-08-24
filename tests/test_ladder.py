@@ -498,3 +498,94 @@ def test_web_and_mcp_paths_store_the_same_system_prompt(store):
     assert job["system"] == expected, "web path must store the full system prompt"
     assert "EXTRA" in job["system"]
     assert job["system"].startswith(prompts.BASE[:40])
+
+
+# --------------------------------------------------------------------------
+# Adjudication
+#
+# Structural verifiers check shape, not correctness. Observed live: a 3B
+# returned well-formed JSON asserting "charlie" has 6 characters (it has 7).
+# The json verifier passed it and the job was recorded as a rung-0 success.
+# Adjudication asks the next rung up whether the answer is actually right.
+# --------------------------------------------------------------------------
+
+def test_adjudication_verdict_parsing():
+    from ladder.router import adjudication_verdict
+
+    assert adjudication_verdict("PASS - looks right")[0]
+    assert adjudication_verdict("  pass, fine")[0]
+    assert adjudication_verdict("**PASS** ok")[0]
+    assert not adjudication_verdict("FAIL - charlie has 7 letters")[0]
+    assert not adjudication_verdict("I think maybe?")[0], "ambiguity must not pass"
+    assert not adjudication_verdict("")[0], "empty must not pass"
+
+
+class Adjudicating(FakeEngine):
+    """Answers tasks, and plays adjudicator when handed the checker prompt."""
+
+    def __init__(self, verdict: str):
+        super().__init__(succeed_at_rung=0)
+        self.verdict = verdict
+        self.adjudications = 0
+
+    def run(self, tier, system, prompt, max_tokens=8000):
+        if "PROPOSED ANSWER:" in prompt:
+            self.adjudications += 1
+            return Result(text=self.verdict, ok=True, engine="fake",
+                          model=tier.model, rung=tier.rung, cost_usd=0.001)
+        return super().run(tier, system, prompt, max_tokens)
+
+
+def test_adjudicator_rejection_forces_escalation(store):
+    eng = Adjudicating("FAIL - the count is wrong")
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", adjudicate=True, max_rung=2)
+    # Rejected at rung 0 and 1, so it climbs; rung 2 is the ceiling and is
+    # accepted without adjudication since there is no rung above it to ask.
+    assert out["ok"] and out["rung"] == 2
+    assert out["escalations"] == 2
+
+
+def test_adjudicator_approval_keeps_the_cheap_answer(store):
+    eng = Adjudicating("PASS - correct")
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", adjudicate=True)
+    assert out["ok"] and out["rung"] == 0, "an approved cheap answer must stand"
+    assert eng.adjudications == 1
+
+
+def test_adjudication_is_off_by_default(store):
+    eng = Adjudicating("FAIL - would reject everything")
+    out = router_with(eng, store=store).run_job(prompt="p", kind="classify")
+    assert out["ok"] and out["rung"] == 0
+    assert eng.adjudications == 0, "must not spend money unless asked"
+
+
+def test_no_adjudication_at_the_ceiling(store):
+    """There is no rung above the ceiling to ask, so do not pay for a check."""
+    eng = Adjudicating("FAIL")
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", rung=0, max_rung=0, adjudicate=True)
+    assert out["ok"] and eng.adjudications == 0
+
+
+def test_broken_adjudicator_does_not_escalate_everything(store):
+    """If the checker itself fails, that is an infra problem, not a spending one."""
+
+    class BrokenChecker(FakeEngine):
+        def run(self, tier, system, prompt, max_tokens=8000):
+            if "PROPOSED ANSWER:" in prompt:
+                return Result(text="", ok=False, engine="fake", model=tier.model,
+                              rung=tier.rung, error="adjudicator exploded")
+            return super().run(tier, system, prompt, max_tokens)
+
+    out = router_with(BrokenChecker(), store=store).run_job(
+        prompt="p", kind="classify", adjudicate=True)
+    assert out["ok"] and out["rung"] == 0
+
+
+def test_adjudication_cost_is_counted(store):
+    eng = Adjudicating("PASS")
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", adjudicate=True)
+    assert out["cost_usd"] >= 0.001, "the check call must show up in the bill"

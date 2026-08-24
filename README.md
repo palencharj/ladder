@@ -114,6 +114,25 @@ ladder_run(prompt="...", kind="classify", model="qwen2.5-coder:3b", max_rung=0)
 The override applies to the starting rung only, keeping that rung's engine and
 pricing. Any escalation above it uses each rung's standard model.
 
+**Make a cheap tier trustworthy:**
+
+`verify` checks *form*, not *correctness*. A 3B will happily return well-formed
+JSON claiming `"charlie"` has 6 characters, and `verify: "json"` passes it —
+observed live. Structural verifiers cannot catch a wrong answer.
+
+`adjudicate: true` asks the **next rung up** whether the answer is actually
+right, and escalates if it is not:
+
+```
+ladder_run(prompt="...", kind="extract", rung=0, verify="json", adjudicate=true)
+```
+
+Tested against that exact failure: the adjudicator rejected `charlie: 6` with
+"it has 7 characters (c-h-a-r-l-i-e)", approved the correct answer, and caught
+an answer that silently omitted a key. One small check call costs far less than
+running the whole task a rung higher — this is how you trust the free tier on
+work that has to be right.
+
 **Cap the spend on anything:**
 
 Set `max_rung` equal to the starting rung and escalation is forbidden — the job

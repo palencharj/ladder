@@ -108,6 +108,7 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
             verify=body.get("verify"), max_tokens=int(body.get("max_tokens", 8000)),
             title=body.get("title", ""), job_id=job_id,
             model=body.get("model"),
+            adjudicate=bool(body.get("adjudicate", False)),
         )
         return jsonify({"job_id": job_id, "start_rung": start.rung,
                         "start_tier": start.name, "max_rung": ceiling}), 202
@@ -152,6 +153,7 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
                 verify=t.get("verify", defaults["verify"]),
                 max_tokens=int(t.get("max_tokens", defaults["max_tokens"])),
                 model=t.get("model", body.get("model")),
+                adjudicate=bool(t.get("adjudicate", body.get("adjudicate", False))),
             )
             for t in raw if t.get("prompt")
         ]

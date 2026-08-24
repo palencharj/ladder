@@ -90,7 +90,8 @@ TOOLS = [
                 "tier": {"type": "string", "description": "Force a tier by name (local, haiku, sonnet, sonnet-high, opus, fable). Overrides rung and kind."},
                 "model": {"type": "string", "description": "Swap the model at the starting rung only, keeping that rung's engine and pricing. Use a smaller local model for short-output work: qwen2.5-coder:3b classifies in ~4s where the 30B default takes ~30s. Escalation above the start rung uses each rung's standard model."},
                 "max_rung": {"type": "integer", "description": "Ceiling for escalation. Set to the same value as rung to forbid escalation entirely (e.g. max_rung=0 keeps a job free)."},
-                "verify": {"type": "string", "enum": ["python", "json", "nonempty"], "description": "Check applied to the output. On failure the job escalates one rung. 'python' means the output must parse as Python."},
+                "verify": {"type": "string", "enum": ["python", "json", "nonempty"], "description": "Structural check applied to the output. On failure the job escalates one rung. 'python' means the output must parse as Python. NOTE: this checks form only, never correctness -- use adjudicate for that."},
+                "adjudicate": {"type": "boolean", "description": "Have the next rung up check the answer before accepting it. Structural verifiers catch malformed output but not WRONG output -- a small local model will return well-formed JSON with a wrong number in it and the 'json' verify passes. Adjudication costs one small call at the rung above (far less than running the whole task there) and escalates if the answer is rejected. Use it whenever a cheap tier's answer has to be right rather than merely well-formed."},
                 "system_extra": {"type": "string", "description": "Extra context appended to the system prompt, e.g. project conventions."},
                 "max_tokens": {"type": "integer", "description": "Output cap. Default 8000. Use ~256 for classification."},
                 "title": {"type": "string", "description": "Short label for the dashboard."},
@@ -124,6 +125,7 @@ TOOLS = [
                             "model": {"type": "string"},
                             "max_rung": {"type": "integer"},
                             "verify": {"type": "string"},
+                            "adjudicate": {"type": "boolean"},
                             "title": {"type": "string"},
                         },
                         "required": ["prompt"],
@@ -132,6 +134,7 @@ TOOLS = [
                 "kind": {"type": "string", "description": "Default kind for tasks that do not set one."},
                 "max_rung": {"type": "integer", "description": "Default escalation ceiling for all tasks."},
                 "verify": {"type": "string", "enum": ["python", "json", "nonempty"]},
+                "adjudicate": {"type": "boolean", "description": "Have the next rung up check the answer before accepting it. Structural verifiers catch malformed output but not WRONG output -- a small local model will return well-formed JSON with a wrong number in it and the 'json' verify passes. Adjudication costs one small call at the rung above (far less than running the whole task there) and escalates if the answer is rejected. Use it whenever a cheap tier's answer has to be right rather than merely well-formed."},
                 "system_extra": {"type": "string"},
                 "wait": {"type": "boolean", "description": "Block until every task finishes and return all results. Default false (returns a swarm_id to poll)."},
             },
@@ -252,6 +255,7 @@ def t_run(args: dict) -> dict:
         max_tokens=int(args.get("max_tokens", 8000)),
         title=args.get("title", ""),
         model=args.get("model"),
+        adjudicate=bool(args.get("adjudicate", False)),
     )
     head = (
         f"job {out['job_id']} | {'ok' if out['ok'] else 'FAILED'} | "
@@ -280,6 +284,7 @@ def t_swarm(args: dict) -> dict:
             verify=t.get("verify", args.get("verify")),
             max_tokens=int(t.get("max_tokens", 8000)),
             model=t.get("model", args.get("model")),
+            adjudicate=bool(t.get("adjudicate", args.get("adjudicate", False))),
         )
         for t in raw if t.get("prompt")
     ]
