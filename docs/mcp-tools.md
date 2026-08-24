@@ -50,6 +50,7 @@ Run one task on the cheapest tier that can do it.
 | `kind` | string | `implement` | Sets the starting rung. See the kind table below. |
 | `rung` | int | from `kind` | Force a starting rung, 0–5. |
 | `tier` | string | — | Force a tier by name. Overrides `rung` and `kind`. |
+| `model` | string | tier default | Swap the model at the starting rung only. `qwen2.5-coder:3b` classifies in ~1.7s vs ~34s for the 30B default. |
 | `max_rung` | int | 5 | Escalation ceiling. Set equal to the start rung to forbid escalation. |
 | `verify` | enum | — | `python`, `json`, or `nonempty`. Failure escalates one rung. |
 | `system_extra` | string | — | Appended to the system prompt. Project conventions go here. |

@@ -88,6 +88,7 @@ TOOLS = [
                 "kind": {"type": "string", "description": _KIND_DESC},
                 "rung": {"type": "integer", "description": _EFFORT_DESC},
                 "tier": {"type": "string", "description": "Force a tier by name (local, haiku, sonnet, sonnet-high, opus, fable). Overrides rung and kind."},
+                "model": {"type": "string", "description": "Swap the model at the starting rung only, keeping that rung's engine and pricing. Use a smaller local model for short-output work: qwen2.5-coder:3b classifies in ~4s where the 30B default takes ~30s. Escalation above the start rung uses each rung's standard model."},
                 "max_rung": {"type": "integer", "description": "Ceiling for escalation. Set to the same value as rung to forbid escalation entirely (e.g. max_rung=0 keeps a job free)."},
                 "verify": {"type": "string", "enum": ["python", "json", "nonempty"], "description": "Check applied to the output. On failure the job escalates one rung. 'python' means the output must parse as Python."},
                 "system_extra": {"type": "string", "description": "Extra context appended to the system prompt, e.g. project conventions."},
@@ -120,6 +121,7 @@ TOOLS = [
                             "kind": {"type": "string"},
                             "rung": {"type": "integer"},
                             "tier": {"type": "string"},
+                            "model": {"type": "string"},
                             "max_rung": {"type": "integer"},
                             "verify": {"type": "string"},
                             "title": {"type": "string"},
@@ -249,6 +251,7 @@ def t_run(args: dict) -> dict:
         verify=args.get("verify"),
         max_tokens=int(args.get("max_tokens", 8000)),
         title=args.get("title", ""),
+        model=args.get("model"),
     )
     head = (
         f"job {out['job_id']} | {'ok' if out['ok'] else 'FAILED'} | "
@@ -276,6 +279,7 @@ def t_swarm(args: dict) -> dict:
             system_extra=t.get("system_extra", args.get("system_extra", "")),
             verify=t.get("verify", args.get("verify")),
             max_tokens=int(t.get("max_tokens", 8000)),
+            model=t.get("model", args.get("model")),
         )
         for t in raw if t.get("prompt")
     ]

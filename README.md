@@ -101,6 +101,19 @@ because CPU inference is near zero-sum, while Haiku jobs fan out 12-wide.
 One job per file, concurrent, at rung 1 by default. Pass `rung: 0` to make an
 entire review pass free.
 
+**Pick a smaller local model for short answers:**
+
+Rung 0 defaults to the 30B because for code generation it is no slower than a
+7B and much smarter. For one-word answers that flips — a 3B classifies in
+**1.7s** where the 30B takes **33.8s**, both free and both correct:
+
+```
+ladder_run(prompt="...", kind="classify", model="qwen2.5-coder:3b", max_rung=0)
+```
+
+The override applies to the starting rung only, keeping that rung's engine and
+pricing. Any escalation above it uses each rung's standard model.
+
 **Cap the spend on anything:**
 
 Set `max_rung` equal to the starting rung and escalation is forbidden — the job

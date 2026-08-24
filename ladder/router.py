@@ -20,6 +20,7 @@ import ast
 import json as _json
 import re
 from collections.abc import Callable
+from dataclasses import replace
 
 from . import prompts, tiers
 from .engines import AnthropicEngine, ClaudeCliEngine, OllamaEngine, Result
@@ -124,13 +125,23 @@ class Router:
                 max_rung: int | None = None, system_extra: str = "",
                 verify: str | Verifier | None = None, max_tokens: int = 8000,
                 title: str = "", swarm_id: str | None = None,
-                job_id: str | None = None) -> dict:
+                job_id: str | None = None, model: str | None = None) -> dict:
         """Run one task, escalating on failure. Returns a compact result dict.
 
         The dict deliberately carries only the final text plus accounting --
         never the full transcript. Detail lives in the store.
+
+        ``model`` swaps the model at the *starting* rung only, keeping that
+        rung's engine, pricing, and concurrency budget. It exists so a caller
+        can pick a smaller, faster local model for short-output work -- a 3B
+        classifies in a few seconds where a 30B takes half a minute -- without
+        inventing a whole new rung. Escalation above the start rung always uses
+        the standard model for each rung, because the override is a statement
+        about this task, not about the ladder.
         """
         start_tier = tiers.resolve(kind=kind, rung=rung, tier_name=tier_name)
+        if model:
+            start_tier = replace(start_tier, model=model)
         ceiling = tiers.MAX_RUNG if max_rung is None else max(start_tier.rung, max_rung)
         system = prompts.system_for(kind, system_extra)
         checker = self._resolve_verifier(verify)
@@ -148,7 +159,9 @@ class Router:
         last: Result | None = None
 
         for n, rung_n in enumerate(range(start_tier.rung, ceiling + 1), start=1):
-            tier = tiers.by_rung(rung_n)
+            # The override applies to the starting rung only; every rung above
+            # it uses that rung's standard model.
+            tier = start_tier if rung_n == start_tier.rung else tiers.by_rung(rung_n)
             res = self.engine_for(tier).run(tier, system, prompt,
                                             max_tokens=max_tokens)
             last = res

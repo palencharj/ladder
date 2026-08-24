@@ -120,6 +120,35 @@ At ~4 tok/s, a 200-token docstring takes about a minute. That is unusable in a
 loop a human is watching, and perfectly fine for fifty docstrings generated
 while you do something else. Use rung 0 for work you can walk away from.
 
+## Picking a smaller local model per task
+
+Rung 0's default is the 30B, because for code generation it is no slower than a
+7B and considerably smarter. For **short-output** work that calculus inverts
+completely -- generation time dominates, and a 3B finishes far sooner.
+
+Measured, same prompt, same correct answer (`BUG`), both free:
+
+| Model | Wall clock |
+|---|---|
+| `qwen2.5-coder:3b` | **1.7 s** |
+| `qwen3-coder:30b` (default) | 33.8 s |
+
+A 20x speedup for a one-word classification. Pass `model` to use it:
+
+```
+ladder_run(prompt="...", kind="classify", model="qwen2.5-coder:3b", max_rung=0)
+```
+
+The override applies to the **starting rung only** and keeps that rung's
+engine, pricing, and concurrency budget. If the job escalates, each rung above
+uses its own standard model -- the override describes this task, not the ladder.
+
+Rule of thumb: under ~50 tokens of expected output, use the 3B. Above that,
+the extra capability of the 30B is worth the wait, since you are waiting either
+way.
+
+Pull it with `ollama pull qwen2.5-coder:3b` (1.9 GB).
+
 ## Tuning the policy
 
 The whole cost policy is `TASK_RUNGS` in `ladder/tiers.py`:

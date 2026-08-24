@@ -318,3 +318,58 @@ def test_task_start_rung_follows_the_same_rules_as_resolve():
     assert Task(prompt="p", kind="classify").start_rung() == 0
     assert Task(prompt="p", kind="classify", rung=3).start_rung() == 3
     assert Task(prompt="p", tier_name="fable").start_rung() == tiers.MAX_RUNG
+
+
+# --------------------------------------------------------------------------
+# Per-job model override
+# --------------------------------------------------------------------------
+
+class RecordingEngine(FakeEngine):
+    """Remembers the model string it was handed at each rung."""
+
+    def __init__(self, succeed_at_rung=0):
+        super().__init__(succeed_at_rung=succeed_at_rung)
+        self.models: list[str] = []
+
+    def run(self, tier, system, prompt, max_tokens=8000):
+        self.models.append(tier.model)
+        return super().run(tier, system, prompt, max_tokens)
+
+
+def test_model_override_replaces_model_at_start_rung(store):
+    eng = RecordingEngine()
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", model="qwen2.5-coder:3b")
+    assert out["ok"] and eng.models == ["qwen2.5-coder:3b"]
+
+
+def test_model_override_keeps_the_rung_and_its_pricing(store):
+    """Overriding the model must not smuggle in a different tier's economics."""
+    eng = RecordingEngine()
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", model="some-other-model")
+    assert out["rung"] == 0 and out["tier"] == "local"
+    assert out["cost_usd"] == 0.0, "rung 0 must stay free whatever model runs"
+
+
+def test_escalation_above_start_uses_standard_models(store):
+    """The override describes this task, not the ladder."""
+    eng = RecordingEngine(succeed_at_rung=2)
+    router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", model="qwen2.5-coder:3b")
+    assert eng.models[0] == "qwen2.5-coder:3b"
+    assert eng.models[1] == tiers.by_rung(1).model
+    assert eng.models[2] == tiers.by_rung(2).model
+
+
+def test_no_override_uses_the_tier_default(store):
+    eng = RecordingEngine()
+    router_with(eng, store=store).run_job(prompt="p", kind="classify")
+    assert eng.models == [tiers.by_rung(0).model]
+
+
+def test_swarm_task_carries_model_override(store):
+    eng = RecordingEngine()
+    sw = Swarm(router_with(eng, store=store))
+    sw.run([Task(prompt="p", kind="classify", model="qwen2.5-coder:3b")], "s-model")
+    assert eng.models == ["qwen2.5-coder:3b"]
