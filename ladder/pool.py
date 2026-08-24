@@ -11,9 +11,18 @@ The rungs have completely different scaling behaviour:
 * Rungs 1-5 are **network-bound**. Fanning out is nearly free in wall-clock
   terms, and the only real limits are API rate limits and your wallet.
 
-So a swarm that mixes rungs needs one semaphore per tier, not a single pool.
-A batch of 50 local jobs and 50 Haiku jobs should not have the local jobs
-starving the Haiku ones.
+So a swarm that mixes rungs must not share one thread pool. A batch of 50 local
+jobs and 50 Haiku jobs must not let the local jobs starve the Haiku ones.
+
+Two mechanisms, doing different jobs -- the distinction matters, because
+conflating them is how the first version shipped a starvation bug:
+
+* **Per-rung thread pools** (`Swarm.run`) provide fairness *within* one swarm.
+* **Per-rung semaphores** (`TierGate`) bound concurrency *across* simultaneous
+  swarms, which a per-swarm pool cannot observe.
+
+Semaphores alone are not sufficient for fairness: a thread blocked on one still
+occupies a pool slot. See `Swarm.run` for the measurement.
 """
 
 from __future__ import annotations
@@ -66,13 +75,9 @@ class TierGate:
 class Swarm:
     """Runs a batch of tasks through a Router, respecting per-tier limits."""
 
-    def __init__(self, router, gate: TierGate | None = None,
-                 max_workers: int | None = None):
+    def __init__(self, router, gate: TierGate | None = None):
         self.router = router
         self.gate = gate or TierGate()
-        # Total worker threads only needs to cover the sum of the per-tier
-        # budgets; beyond that, threads would just block on semaphores.
-        self.max_workers = max_workers or sum(t.concurrency for t in tiers.LADDER)
 
     def _run_one(self, task: Task, swarm_id: str) -> dict:
         rung = task.start_rung()

@@ -426,3 +426,75 @@ def test_every_task_still_runs_when_partitioned_by_rung():
     res = Swarm(router).run(tasks, "mixed")
     assert res["total"] == 18 and res["succeeded"] == 18
     assert len(eng.calls) == 18
+
+
+# --------------------------------------------------------------------------
+# Local timeouts
+#
+# A fixed timeout made the free tier bill you: default max_tokens=8000 at the
+# 3-5 tok/s of CPU inference needs 1400-2500s, but the deadline was 900s. Every
+# rung-0 job that filled its budget timed out, the router read that as failure,
+# and the job escalated to a paid tier.
+# --------------------------------------------------------------------------
+
+def test_local_deadline_scales_with_requested_tokens():
+    from ladder.engines.ollama_engine import MIN_TOKENS_PER_SEC, OllamaEngine
+
+    eng = OllamaEngine()
+    small, large = eng._timeout_for(300), eng._timeout_for(8000)
+    assert large > small, "a bigger generation must get a longer deadline"
+    # The deadline must actually cover the work at the pessimistic floor rate.
+    assert large >= 8000 / MIN_TOKENS_PER_SEC
+
+
+def test_default_max_tokens_is_survivable_at_rung_zero():
+    """Regression: the shipped defaults must not guarantee a timeout."""
+    from ladder.engines.ollama_engine import OllamaEngine
+
+    default_max_tokens = 8000
+    slowest_measured_tps = 3.2
+    deadline = OllamaEngine()._timeout_for(default_max_tokens)
+    needed = default_max_tokens / slowest_measured_tps
+    assert deadline >= needed, (
+        f"default max_tokens={default_max_tokens} needs ~{needed:.0f}s at "
+        f"{slowest_measured_tps} tok/s but the deadline is {deadline}s -- "
+        "the free tier would time out and escalate to a paid rung"
+    )
+
+
+def test_local_deadline_is_bounded():
+    from ladder.engines.ollama_engine import MAX_TIMEOUT_SEC, OllamaEngine
+
+    assert OllamaEngine()._timeout_for(10_000_000) == MAX_TIMEOUT_SEC
+
+
+def test_explicit_timeout_still_wins():
+    from ladder.engines.ollama_engine import OllamaEngine
+
+    assert OllamaEngine(timeout=42)._timeout_for(8000) == 42
+
+
+# --------------------------------------------------------------------------
+# Stored system prompt
+# --------------------------------------------------------------------------
+
+def test_web_and_mcp_paths_store_the_same_system_prompt(store):
+    """The dashboard showed only system_extra for web-created jobs."""
+    from ladder import prompts
+    from ladder.server import create_app
+
+    app = create_app(db_path=str(Path(store.path).parent / "web.db"))
+    app.config.update(TESTING=True)
+    client = app.test_client()
+
+    resp = client.post("/api/job", json={"prompt": "x", "kind": "review",
+                                         "max_rung": 0, "system_extra": "EXTRA"})
+    assert resp.status_code == 202
+    job_id = resp.get_json()["job_id"]
+
+    job = app.ladder_store.get_job(job_id)
+    app.ladder_store.close()
+    expected = prompts.system_for("review", "EXTRA")
+    assert job["system"] == expected, "web path must store the full system prompt"
+    assert "EXTRA" in job["system"]
+    assert job["system"].startswith(prompts.BASE[:40])

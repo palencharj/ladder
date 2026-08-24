@@ -13,7 +13,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import tiers
+from . import prompts, tiers
 from .pool import Swarm, Task, TierGate
 from .router import Router
 from .store import Store
@@ -27,6 +27,11 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
     router = Router(store=store, cwd=cwd)
     gate = TierGate()
     swarm = Swarm(router, gate=gate)
+
+    # Exposed so callers can release the SQLite handle. On Windows an open
+    # connection keeps a lock on the file, which blocks tests from cleaning up
+    # their temp directory and blocks anything else from removing the db.
+    app.ladder_store = store
 
     # Background execution so HTTP returns immediately with a job id.
     runner = threading.Semaphore(sum(t.concurrency for t in tiers.LADDER))
@@ -90,7 +95,8 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
 
         job_id = store.create_job(
             kind=kind, title=body.get("title") or prompt[:80], prompt=prompt,
-            system=body.get("system_extra", ""), start_rung=start.rung,
+            system=prompts.system_for(kind, body.get("system_extra", "")),
+            start_rung=start.rung,
             max_rung=ceiling, cwd=cwd,
         )
 

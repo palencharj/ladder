@@ -120,6 +120,30 @@ At ~4 tok/s, a 200-token docstring takes about a minute. That is unusable in a
 loop a human is watching, and perfectly fine for fifty docstrings generated
 while you do something else. Use rung 0 for work you can walk away from.
 
+### Timeouts at rung 0
+
+Local deadlines are derived from `max_tokens`, not fixed. A fixed timeout is
+wrong here because how long a job takes depends entirely on how many tokens you
+asked for and how slow the machine is.
+
+This mattered more than it sounds. The original fixed 900s deadline, combined
+with the default `max_tokens` of 8000, meant every rung-0 job that genuinely
+filled its budget timed out — 8000 tokens at 3.2 tok/s needs about 2500s. The
+router read the timeout as a failure and escalated to a **paid** rung. The free
+tier was quietly spending money on work the local model would have finished
+given another twenty minutes.
+
+The deadline is now `max_tokens / 2.0 + 120s`, clamped to [300s, 7200s]. The
+2.0 tok/s floor is deliberately slower than any machine measured — being too
+generous only delays a failure, while being too tight costs real money. The
+constants are at the top of `ladder/engines/ollama_engine.py`; raise
+`MIN_TOKENS_PER_SEC` if your hardware is faster and you want quicker failures.
+
+A practical consequence: at default `max_tokens`, a rung-0 job can legitimately
+run for over an hour. That is the free tier working as intended, not a hang.
+Pass a smaller `max_tokens` when you want a bound — it tightens the deadline
+proportionally.
+
 ## Picking a smaller local model per task
 
 Rung 0's default is the 30B, because for code generation it is no slower than a
