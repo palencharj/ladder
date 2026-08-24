@@ -127,12 +127,18 @@ TOOLS = [
                             "max_rung": {"type": "integer"},
                             "verify": {"type": "string"},
                             "adjudicate": {"type": "boolean"},
+                            "system_extra": {"type": "string"},
+                            "max_tokens": {"type": "integer"},
                             "title": {"type": "string"},
                         },
                         "required": ["prompt"],
                     },
                 },
                 "kind": {"type": "string", "description": "Default kind for tasks that do not set one."},
+                "rung": {"type": "integer", "description": "Default starting rung for all tasks. " + _EFFORT_DESC},
+                "tier": {"type": "string", "description": "Default tier by name for all tasks. Overrides rung and kind."},
+                "model": {"type": "string", "description": "Default model override for all tasks, applied at the starting rung only."},
+                "max_tokens": {"type": "integer", "description": "Default output cap for all tasks. Default 8000."},
                 "max_rung": {"type": "integer", "description": "Default escalation ceiling for all tasks."},
                 "verify": {"type": "string", "enum": ["python", "json", "nonempty"]},
                 "adjudicate": {"type": "boolean", "description": "Have the next rung up check the answer before accepting it. Structural verifiers catch malformed output but not WRONG output -- a small local model will return well-formed JSON with a wrong number in it and the 'json' verify passes. Adjudication costs one small call at the rung above (far less than running the whole task there) and escalates if the answer is rejected. Use it whenever a cheap tier's answer has to be right rather than merely well-formed."},
@@ -301,12 +307,15 @@ def t_swarm(args: dict) -> dict:
             prompt=t["prompt"],
             kind=t.get("kind", args.get("kind", "implement")),
             title=t.get("title", ""),
-            rung=t.get("rung"),
-            tier_name=t.get("tier"),
+            # Every setting falls back to the swarm-level default. `rung` and
+            # `max_tokens` used not to, so a swarm-level rung was silently
+            # dropped and the tasks quietly ran somewhere else entirely.
+            rung=t.get("rung", args.get("rung")),
+            tier_name=t.get("tier", args.get("tier")),
             max_rung=t.get("max_rung", args.get("max_rung")),
             system_extra=t.get("system_extra", args.get("system_extra", "")),
             verify=t.get("verify", args.get("verify")),
-            max_tokens=int(t.get("max_tokens", 8000)),
+            max_tokens=int(t.get("max_tokens", args.get("max_tokens", 8000))),
             model=t.get("model", args.get("model")),
             adjudicate=bool(t.get("adjudicate", args.get("adjudicate", False))),
         )
@@ -469,6 +478,43 @@ def t_report(args: dict) -> dict:
     return {"text": _verdict.render(rep, assessment)}
 
 
+def validate_args(tool: dict, args: dict) -> str | None:
+    """Return an error string if `args` contains keys the tool does not accept.
+
+    Silently ignoring an unknown argument is the worst failure mode this server
+    has: the call succeeds, the report looks healthy, and the work quietly ran
+    somewhere other than where it was asked to. Found the hard way -- a
+    swarm-level `rung` was dropped and an entire batch ran on the local tier
+    while reporting success.
+
+    Names are checked one level deep into `tasks[]` too, since that is where
+    most per-task settings live.
+    """
+    schema = tool.get("inputSchema", {})
+    allowed = set(schema.get("properties", {}))
+    unknown = sorted(set(args) - allowed)
+    if unknown:
+        return (
+            f"unknown argument(s) for {tool['name']}: {', '.join(unknown)}. "
+            f"Accepted: {', '.join(sorted(allowed)) or '(none)'}."
+        )
+
+    item_schema = (schema.get("properties", {}).get("tasks", {})
+                   .get("items", {}).get("properties"))
+    if item_schema and isinstance(args.get("tasks"), list):
+        task_allowed = set(item_schema)
+        for i, task in enumerate(args["tasks"]):
+            if not isinstance(task, dict):
+                continue
+            bad = sorted(set(task) - task_allowed)
+            if bad:
+                return (
+                    f"unknown key(s) in tasks[{i}]: {', '.join(bad)}. "
+                    f"Accepted per task: {', '.join(sorted(task_allowed))}."
+                )
+    return None
+
+
 HANDLERS = {
     "ladder_report": t_report,
     "ladder_health": t_health,
@@ -517,6 +563,11 @@ def handle(msg: dict) -> dict | None:
         if not fn:
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32601, "message": f"unknown tool: {name}"}}
+
+        tool = next((t for t in TOOLS if t["name"] == name), None)
+        if tool and (problem := validate_args(tool, args)):
+            return {"jsonrpc": "2.0", "id": mid, "result": {
+                "content": [{"type": "text", "text": problem}], "isError": True}}
         try:
             out = fn(args)
             return {"jsonrpc": "2.0", "id": mid,

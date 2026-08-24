@@ -899,3 +899,95 @@ def test_report_counts_invocations_not_batched_attempts(store):
     assert rep["paid_attempts"] == 10
     assert rep["cli_calls"] == 1
     assert rep["batch_savings_tokens"] == 9 * tiers.CLI_OVERHEAD_TOKENS
+
+
+# --------------------------------------------------------------------------
+# MCP argument hygiene
+#
+# Found by using the tool: a swarm-level `rung` was silently dropped because
+# the schema never declared it and the task builder never read it. The call
+# reported success while every task ran on a different tier than asked for.
+# Silent parameter drops are worse than errors -- the report looks healthy.
+# --------------------------------------------------------------------------
+
+def _mcp():
+    import sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parent.parent / "mcp"))
+    import ladder_mcp
+
+    return ladder_mcp
+
+
+def _tool(name):
+    return next(t for t in _mcp().TOOLS if t["name"] == name)
+
+
+def test_every_arg_a_handler_reads_is_declared_in_its_schema():
+    """Schema and implementation must not drift: undeclared args get dropped
+    before the hardening, and falsely rejected after it."""
+    import inspect
+    import re
+
+    m = _mcp()
+    for name, fn in m.HANDLERS.items():
+        src = inspect.getsource(fn)
+        declared = set(_tool(name)["inputSchema"].get("properties", {}))
+        read = set(re.findall(r'args\.get\(\s*"([a-z_]+)"', src))
+        missing = read - declared
+        assert not missing, f"{name} reads undeclared args: {sorted(missing)}"
+
+
+def test_every_per_task_key_the_swarm_reads_is_declared():
+    import inspect
+    import re
+
+    src = inspect.getsource(_mcp().t_swarm)
+    items = _tool("ladder_swarm")["inputSchema"]["properties"]["tasks"]["items"]
+    declared = set(items["properties"])
+    read = set(re.findall(r't\.get\(\s*"([a-z_]+)"', src)) | {"prompt"}
+    missing = read - declared
+    assert not missing, f"tasks[] reads undeclared keys: {sorted(missing)}"
+
+
+def test_swarm_level_defaults_reach_every_task():
+    """A swarm-level rung must apply to tasks that do not set their own."""
+    import inspect
+    import re
+
+    src = inspect.getsource(_mcp().t_swarm)
+    for field in ("rung", "max_rung", "kind", "verify", "max_tokens", "model"):
+        assert re.search(rf't\.get\("{field}",\s*args\.get\("{field}"', src), (
+            f"swarm-level {field!r} does not fall through to tasks; it would be "
+            "silently ignored"
+        )
+
+
+def test_unknown_top_level_argument_is_rejected():
+    m = _mcp()
+    err = m.validate_args(_tool("ladder_run"), {"prompt": "x", "effort": "high"})
+    assert err and "effort" in err
+    assert "Accepted:" in err, "the error must say what IS accepted"
+
+
+def test_unknown_per_task_key_is_rejected():
+    m = _mcp()
+    err = m.validate_args(_tool("ladder_swarm"),
+                          {"tasks": [{"prompt": "x", "rungg": 0}]})
+    assert err and "rungg" in err and "tasks[0]" in err
+
+
+def test_valid_arguments_pass_validation():
+    m = _mcp()
+    assert m.validate_args(_tool("ladder_run"),
+                           {"prompt": "x", "rung": 0, "adjudicate": True}) is None
+    assert m.validate_args(_tool("ladder_swarm"), {
+        "tasks": [{"prompt": "x", "max_tokens": 50, "system_extra": "ctx"}],
+        "rung": 1, "batch": True,
+    }) is None
+
+
+def test_validation_tolerates_malformed_task_entries():
+    """Bad input should produce a clear message, never a crash."""
+    m = _mcp()
+    assert m.validate_args(_tool("ladder_swarm"), {"tasks": ["not a dict"]}) is None
+    assert m.validate_args(_tool("ladder_swarm"), {"tasks": "not a list"}) is None
