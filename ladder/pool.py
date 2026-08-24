@@ -91,16 +91,53 @@ class Swarm:
         finally:
             self.gate.release(rung)
 
-    def run(self, tasks: list[Task], swarm_id: str) -> dict:
-        """Execute every task; return per-task results plus a roll-up."""
-        results: list[dict] = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {pool.submit(self._run_one, t, swarm_id): t for t in tasks}
+    def _drain_group(self, rung: int, group: list[Task], swarm_id: str,
+                     results: list[dict], lock: threading.Lock) -> None:
+        """Run one rung's tasks in a pool sized to that rung's budget."""
+        width = min(len(group), max(1, tiers.by_rung(rung).concurrency))
+        with ThreadPoolExecutor(max_workers=width) as pool:
+            futures = {pool.submit(self._run_one, t, swarm_id): t for t in group}
             for fut in as_completed(futures):
                 task = futures[fut]
                 out = fut.result()
                 out.setdefault("title", task.title or task.prompt[:60])
-                results.append(out)
+                with lock:
+                    results.append(out)
+
+    def run(self, tasks: list[Task], swarm_id: str) -> dict:
+        """Execute every task; return per-task results plus a roll-up.
+
+        Tasks are partitioned by starting rung and each rung gets its own
+        thread pool, sized to that rung's concurrency budget. The rung pools
+        then run concurrently with each other.
+
+        This partitioning is load-bearing, not tidiness. A single shared pool
+        deadlocks nothing but starves badly: threads that block acquiring a
+        saturated tier's semaphore keep occupying pool slots, so tasks for
+        *other* tiers queue behind them and never get a thread. Measured with
+        one shared pool, 60 local tasks submitted ahead of 3 Haiku tasks
+        pushed the first Haiku completion to position 29 of 63, despite Haiku
+        having six times the concurrency budget. Per-rung pools mean a slow,
+        narrow tier can never hold a wide, fast one hostage.
+        """
+        groups: dict[int, list[Task]] = {}
+        for t in tasks:
+            groups.setdefault(t.start_rung(), []).append(t)
+
+        results: list[dict] = []
+        lock = threading.Lock()
+        threads = [
+            threading.Thread(
+                target=self._drain_group,
+                args=(rung, group, swarm_id, results, lock),
+                daemon=True,
+            )
+            for rung, group in groups.items()
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
 
         ok = [r for r in results if r.get("ok")]
         cost = sum(r.get("cost_usd", 0.0) for r in results)

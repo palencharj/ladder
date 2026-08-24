@@ -373,3 +373,56 @@ def test_swarm_task_carries_model_override(store):
     sw = Swarm(router_with(eng, store=store))
     sw.run([Task(prompt="p", kind="classify", model="qwen2.5-coder:3b")], "s-model")
     assert eng.models == ["qwen2.5-coder:3b"]
+
+
+# --------------------------------------------------------------------------
+# Cross-tier fairness
+#
+# Regression test for head-of-line blocking. With one shared thread pool,
+# threads blocked on a saturated tier's semaphore still occupy pool slots, so
+# tasks for other tiers queue behind them. Found by running ladder_review at
+# rung 0 over pool.py, then reproduced: 60 local tasks ahead of 3 Haiku tasks
+# delayed the first Haiku completion to position 29 of 63.
+# --------------------------------------------------------------------------
+
+def test_a_saturated_narrow_tier_does_not_starve_a_wide_one():
+    import threading
+    import time
+
+    order: list[str] = []
+    lock = threading.Lock()
+
+    class SlowRouter:
+        def run_job(self, **kw):
+            time.sleep(0.05)
+            with lock:
+                order.append(kw["title"])
+            return {"ok": True, "result": "x", "cost_usd": 0.0,
+                    "trail": [], "escalations": 0}
+
+    # Far more rung-0 tasks than any single pool would have threads for,
+    # submitted ahead of a few rung-1 tasks.
+    tasks = [Task(prompt="p", kind="classify", title=f"local{i}") for i in range(60)]
+    tasks += [Task(prompt="p", kind="doc", title=f"haiku{i}") for i in range(3)]
+
+    Swarm(SlowRouter(), gate=TierGate()).run(tasks, "fairness")
+
+    first_haiku = min(i for i, t in enumerate(order) if t.startswith("haiku"))
+    assert first_haiku <= 8, (
+        f"rung-1 work starved behind rung-0: first haiku completed at "
+        f"position {first_haiku} of {len(order)}"
+    )
+
+
+def test_every_task_still_runs_when_partitioned_by_rung():
+    """Partitioning must not drop or duplicate work."""
+    eng = FakeEngine(succeed_at_rung=0)
+    router = router_with(eng)
+    tasks = (
+        [Task(prompt=f"c{i}", kind="classify") for i in range(10)]
+        + [Task(prompt=f"d{i}", kind="doc") for i in range(5)]
+        + [Task(prompt=f"i{i}", kind="implement") for i in range(3)]
+    )
+    res = Swarm(router).run(tasks, "mixed")
+    assert res["total"] == 18 and res["succeeded"] == 18
+    assert len(eng.calls) == 18

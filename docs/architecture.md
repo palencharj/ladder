@@ -67,8 +67,22 @@ differently:
 - **Rungs 1–5 are network-bound.** Fanning out is nearly free in wall-clock
   terms; the real limits are API rate limits and budget. Haiku's cap is 12.
 
-With a single global pool, a batch of local jobs would starve the API jobs
-queued behind them. One semaphore per rung keeps them independent.
+Semaphores alone are not enough, and this is worth spelling out because the
+first implementation got it wrong. With one shared thread pool, a thread that
+blocks acquiring a saturated tier's semaphore **still occupies a pool slot**.
+Submit 60 local tasks ahead of 3 Haiku tasks and the local ones claim every
+thread; two run, the rest block holding threads hostage, and the Haiku tasks
+never get scheduled. Measured: the first Haiku completion landed at position 29
+of 63, despite Haiku having six times the concurrency budget.
+
+So `Swarm.run` partitions tasks by starting rung and gives each rung its own
+pool, sized to that rung's budget, with the rung pools running concurrently.
+After the fix the first Haiku completion moved to position 2. The semaphores
+are still there — they bound concurrency *across* simultaneous swarms, which a
+per-swarm pool cannot see — but the partitioning is what guarantees fairness.
+
+A slow, narrow tier can never hold a fast, wide one hostage. There is a
+regression test for exactly this.
 
 A task that raises is caught and recorded as a failed result; one bad task
 never takes down a swarm.
