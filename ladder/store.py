@@ -8,11 +8,14 @@ you open the dashboard instead of pasting a transcript into the conversation.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
+
+from . import tiers
 
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "ladder.db"
 
@@ -69,8 +72,35 @@ CREATE INDEX IF NOT EXISTS idx_att_job      ON attempts(job_id);
 """
 
 
+# A job cannot legitimately still be running after this long: the local
+# deadline caps at 7200s and even a full climb through every paid rung is far
+# short of six hours. Anything older was orphaned by a process that died --
+# every Claude Code restart kills the MCP server mid-flight -- and would
+# otherwise sit in `running` forever, skewing every statistic that follows.
+STALE_JOB_SECONDS = 6 * 3600
+
+
+def current_user() -> str:
+    """Best-effort identity, so team usage can be aggregated per person."""
+    import getpass
+
+    for source in (
+        lambda: os.environ.get("LADDER_USER"),
+        getpass.getuser,
+        lambda: os.environ.get("USERNAME"),
+        lambda: os.environ.get("USER"),
+    ):
+        try:
+            value = source()
+        except Exception:  # noqa: BLE001 - getpass raises on odd environments
+            continue
+        if value:
+            return str(value)
+    return "unknown"
+
+
 class Store:
-    def __init__(self, path: str | Path = DEFAULT_DB):
+    def __init__(self, path: str | Path = DEFAULT_DB, reap: bool = True):
         self.path = str(path)
         self._lock = threading.Lock()
         # check_same_thread=False because the Flask server and the worker pool
@@ -81,6 +111,40 @@ class Store:
         with self._lock:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
+        self._migrate()
+        if reap:
+            self.reap_stale()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the first release.
+
+        Databases predate features. `CREATE TABLE IF NOT EXISTS` will not add a
+        column to a table that already exists, so an older ladder.db would
+        otherwise fail every query mentioning a new column.
+        """
+        with self._lock:
+            have = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
+            if "user" not in have:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN user TEXT")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user)"
+                )
+                self._conn.commit()
+
+    def reap_stale(self, max_age_seconds: int = STALE_JOB_SECONDS) -> int:
+        """Mark long-abandoned `running` jobs as failed. Returns how many."""
+        cutoff = time.time() - max_age_seconds
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE jobs SET status='failed',
+                          error='orphaned: the process running this job exited',
+                          finished_at=?
+                   WHERE status IN ('running','queued')
+                     AND COALESCE(started_at, created_at) < ?""",
+                (time.time(), cutoff),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     def close(self) -> None:
         """Release the SQLite handle.
@@ -110,14 +174,14 @@ class Store:
 
     def create_job(self, *, kind: str, title: str, prompt: str, system: str,
                    start_rung: int, max_rung: int, swarm_id: str | None = None,
-                   cwd: str | None = None) -> str:
+                   cwd: str | None = None, user: str | None = None) -> str:
         job_id = uuid.uuid4().hex[:12]
         self._write(
             """INSERT INTO jobs (id, swarm_id, kind, title, prompt, system, status,
-                                 start_rung, max_rung, created_at, cwd)
-               VALUES (?,?,?,?,?,?,'queued',?,?,?,?)""",
+                                 start_rung, max_rung, created_at, cwd, user)
+               VALUES (?,?,?,?,?,?,'queued',?,?,?,?,?)""",
             (job_id, swarm_id, kind, title, prompt, system,
-             start_rung, max_rung, time.time(), cwd),
+             start_rung, max_rung, time.time(), cwd, user or current_user()),
         )
         return job_id
 
@@ -176,6 +240,101 @@ class Store:
         return self._rows(
             "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
         )
+
+    def report(self, days: int | None = None) -> dict:
+        """Is this tool actually earning its keep?
+
+        Built to be able to answer "no". Every number here is either measured
+        or a clearly-labelled counterfactual, and the counterfactual is
+        deliberately conservative:
+
+        * **avoided_spend** prices work that finished free at rung 0 using
+          rung 1 rates -- the cheapest paid tier that could have done it. It is
+          not priced at the top rung, because nobody would have run a docstring
+          through Fable. Pricing against the most expensive model is how tools
+          like this flatter themselves.
+        * **wasted_spend** is money spent on attempts that failed and had to
+          escalate. Trying cheap and missing is not free, and a report that
+          hides it is lying.
+        * **local_hours** is wall-clock spent on the free tier. Free is not
+          free if a person sat waiting for it, so the report converts the
+          trade into an implied hourly rate and judges it.
+
+        net_saving = avoided_spend - wasted_spend. It can be negative.
+        """
+        where, params = "", []
+        if days:
+            where = "WHERE created_at > ?"
+            params = [time.time() - days * 86400]
+
+        totals = self._rows(
+            f"""SELECT COUNT(*) jobs, COALESCE(SUM(cost_usd),0) spend,
+                       COALESCE(SUM(tokens_in),0) tin, COALESCE(SUM(tokens_out),0) tout
+                FROM jobs {where}""", tuple(params))[0]
+
+        att_where = where.replace("created_at", "a.created_at")
+        # Work that actually completed on the free tier.
+        free = self._rows(
+            f"""SELECT COUNT(*) n, COALESCE(SUM(a.tokens_in),0) tin,
+                       COALESCE(SUM(a.tokens_out),0) tout,
+                       COALESCE(SUM(a.latency_ms),0) ms
+                FROM attempts a {att_where}
+                {"AND" if where else "WHERE"} a.rung = 0 AND a.ok = 1""",
+            tuple(params))[0]
+
+        # Money spent on attempts that did not produce the final answer.
+        wasted = self._rows(
+            f"""SELECT COALESCE(SUM(a.cost_usd),0) c, COUNT(*) n
+                FROM attempts a {att_where}
+                {"AND" if where else "WHERE"} a.ok = 0""", tuple(params))[0]
+
+        haiku = tiers.by_rung(1)
+        avoided = tiers.estimate_cost(haiku, free["tin"], free["tout"])
+        net = avoided - wasted["c"]
+        local_hours = free["ms"] / 3_600_000
+
+        jobs_by_start = self._rows(
+            f"""SELECT kind, COUNT(*) n,
+                       SUM(CASE WHEN final_rung = start_rung THEN 1 ELSE 0 END) first_try,
+                       COALESCE(SUM(cost_usd),0) cost
+                FROM jobs {where} {"AND" if where else "WHERE"} status='done'
+                GROUP BY kind ORDER BY n DESC""", tuple(params))
+        for row in jobs_by_start:
+            row["first_try_rate"] = row["first_try"] / row["n"] if row["n"] else 0.0
+
+        by_user = self._rows(
+            f"""SELECT COALESCE(user,'unknown') user, COUNT(*) jobs,
+                       COALESCE(SUM(cost_usd),0) spend,
+                       SUM(CASE WHEN final_rung = 0 THEN 1 ELSE 0 END) free_jobs
+                FROM jobs {where} GROUP BY user ORDER BY jobs DESC""",
+            tuple(params))
+
+        done = self._rows(
+            f"""SELECT COUNT(*) n FROM jobs {where}
+                {"AND" if where else "WHERE"} status='done'""", tuple(params))[0]["n"]
+        first_try = self._rows(
+            f"""SELECT COUNT(*) n FROM jobs {where}
+                {"AND" if where else "WHERE"} status='done'
+                  AND final_rung = start_rung""", tuple(params))[0]["n"]
+
+        return {
+            "window_days": days,
+            "jobs": totals["jobs"],
+            "jobs_done": done,
+            "actual_spend": totals["spend"],
+            "free_attempts": free["n"],
+            "free_tokens_in": free["tin"],
+            "free_tokens_out": free["tout"],
+            "avoided_spend": avoided,
+            "wasted_spend": wasted["c"],
+            "wasted_attempts": wasted["n"],
+            "net_saving": net,
+            "local_hours": local_hours,
+            "implied_hourly_rate": (net / local_hours) if local_hours > 0.01 else None,
+            "first_try_rate": (first_try / done) if done else 0.0,
+            "by_kind": jobs_by_start,
+            "by_user": by_user,
+        }
 
     def stats(self) -> dict:
         totals = self._rows(

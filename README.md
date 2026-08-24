@@ -149,7 +149,8 @@ costs a cent.
 | `ladder_swarm` | Many tasks concurrently, each on its own tier |
 | `ladder_review` | Code review over a set of files, one job per file |
 | `ladder_status` | Job or swarm state, with the full escalation trail |
-| `ladder_stats` | Spend, per-tier breakdown, and savings versus rung 5 |
+| `ladder_stats` | Spend and per-tier breakdown |
+| `ladder_report` | **Is this tool worth running?** A verdict, the numbers behind it, and ranked actions — per user and per task kind |
 
 Full parameter reference: [`docs/mcp-tools.md`](docs/mcp-tools.md).
 

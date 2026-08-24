@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ladder import tiers  # noqa: E402
+from ladder import verdict as _verdict  # noqa: E402
 from ladder.pool import Swarm, Task, TierGate  # noqa: E402
 from ladder.router import Router  # noqa: E402
 from ladder.store import Store  # noqa: E402
@@ -171,6 +172,24 @@ TOOLS = [
                 "swarm_id": {"type": "string"},
                 "limit": {"type": "integer", "description": "With neither id, list this many recent jobs. Default 20."},
                 "full": {"type": "boolean", "description": "Include full result text rather than a truncated preview."},
+            },
+        },
+    },
+    {
+        "name": "ladder_report",
+        "description": (
+            "Is this tool actually worth running? Returns a verdict -- worth-it, "
+            "marginal, or not-worth-it -- with the numbers behind it and ranked "
+            "actions. Unlike ladder_stats it prices avoided work at the CHEAPEST "
+            "paid tier rather than the most expensive, subtracts money wasted on "
+            "failed cheap attempts, and charges the free tier for the wall clock "
+            "it consumed. It can and will conclude the tool is not paying for "
+            "itself. Includes per-user and per-task-kind breakdowns."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Only consider jobs from the last N days. Omit for all time."},
             },
         },
     },
@@ -436,7 +455,16 @@ def t_stats(_args: dict) -> dict:
     return {"text": "\n".join(lines)}
 
 
+def t_report(args: dict) -> dict:
+    rep = _store.report(days=args.get("days"))
+    health = _router.health()
+    assessment = _verdict.assess(
+        rep, using_cli_fallback=health["effective_paid_engine"] == "cli")
+    return {"text": _verdict.render(rep, assessment)}
+
+
 HANDLERS = {
+    "ladder_report": t_report,
     "ladder_health": t_health,
     "ladder_tiers": t_tiers,
     "ladder_run": t_run,

@@ -589,3 +589,128 @@ def test_adjudication_cost_is_counted(store):
     out = router_with(eng, store=store).run_job(
         prompt="p", kind="classify", adjudicate=True)
     assert out["cost_usd"] >= 0.001, "the check call must show up in the bill"
+
+
+# --------------------------------------------------------------------------
+# Worth-it reporting
+#
+# The point of this report is that it can say no. A savings dashboard that
+# only ever reports savings is marketing.
+# --------------------------------------------------------------------------
+
+BASE_REPORT = {
+    "window_days": None, "jobs": 100, "jobs_done": 100, "actual_spend": 1.0,
+    "free_attempts": 50, "free_tokens_in": 100_000, "free_tokens_out": 50_000,
+    "avoided_spend": 2.0, "wasted_spend": 0.1, "wasted_attempts": 5,
+    "net_saving": 1.9, "local_hours": 0.1, "implied_hourly_rate": 19.0,
+    "first_try_rate": 0.95, "by_kind": [], "by_user": [],
+}
+
+
+def _report(**over):
+    return {**BASE_REPORT, **over}
+
+
+def test_verdict_can_say_not_worth_it():
+    from ladder import verdict
+
+    a = verdict.assess(_report(net_saving=-0.5, wasted_spend=2.0), False)
+    assert a["verdict"] == "not-worth-it"
+    assert a["actions"], "a negative verdict must come with something to do"
+
+
+def test_verdict_flags_slow_free_tier_as_marginal():
+    """Free is not free if a person waited for it."""
+    from ladder import verdict
+
+    a = verdict.assess(
+        _report(net_saving=0.02, local_hours=5.0, implied_hourly_rate=0.004), False)
+    assert a["verdict"] == "marginal"
+    assert any("unattended" in x for x in a["actions"])
+
+
+def test_verdict_flags_a_mistuned_policy():
+    from ladder import verdict
+
+    a = verdict.assess(_report(first_try_rate=0.2), False)
+    assert a["verdict"] == "marginal"
+    assert any("TASK_RUNGS" in x for x in a["actions"])
+
+
+def test_verdict_says_worth_it_when_it_is():
+    from ladder import verdict
+
+    assert verdict.assess(_report(), False)["verdict"] == "worth-it"
+
+
+def test_verdict_refuses_to_judge_on_thin_data():
+    from ladder import verdict
+
+    a = verdict.assess(_report(jobs_done=3), False)
+    assert a["verdict"] == "insufficient-data"
+
+
+def test_cli_fallback_is_called_out_as_the_top_lever():
+    from ladder import verdict
+
+    a = verdict.assess(_report(), using_cli_fallback=True)
+    assert "ANTHROPIC_API_KEY" in a["actions"][0], "must be ranked first"
+
+
+def test_render_never_crashes_on_any_verdict():
+    from ladder import verdict
+
+    for over in ({}, {"net_saving": -1.0}, {"jobs_done": 1},
+                 {"implied_hourly_rate": None}, {"first_try_rate": 0.1}):
+        rep = _report(**over)
+        assert verdict.render(rep, verdict.assess(rep, False))
+
+
+# --------------------------------------------------------------------------
+# Store: orphan reaping and per-user attribution
+# --------------------------------------------------------------------------
+
+def test_orphaned_running_jobs_are_reaped(store):
+    """Every Claude Code restart kills the MCP server mid-flight."""
+    import time as _t
+
+    job_id = store.create_job(kind="classify", title="t", prompt="p", system="s",
+                              start_rung=0, max_rung=0)
+    store.mark_running(job_id)
+    store._write("UPDATE jobs SET started_at=? WHERE id=?",
+                 (_t.time() - 7 * 3600, job_id))
+
+    assert store.reap_stale() == 1
+    job = store.get_job(job_id)
+    assert job["status"] == "failed" and "orphaned" in job["error"]
+
+
+def test_live_jobs_are_not_reaped(store):
+    job_id = store.create_job(kind="classify", title="t", prompt="p", system="s",
+                              start_rung=0, max_rung=0)
+    store.mark_running(job_id)
+    assert store.reap_stale() == 0
+    assert store.get_job(job_id)["status"] == "running"
+
+
+def test_jobs_record_a_user(store):
+    from ladder.store import current_user
+
+    job_id = store.create_job(kind="classify", title="t", prompt="p", system="s",
+                              start_rung=0, max_rung=0)
+    assert store.get_job(job_id)["user"] == current_user()
+
+
+def test_report_prices_avoided_work_at_the_cheapest_paid_tier(store):
+    """Not at the most expensive -- nobody would run a docstring through Fable."""
+    eng = FakeEngine(succeed_at_rung=0)
+    r = router_with(eng, store=store)
+    for _ in range(3):
+        r.run_job(prompt="p", kind="classify")
+
+    rep = store.report()
+    haiku = tiers.by_name("haiku")
+    expected = tiers.estimate_cost(haiku, rep["free_tokens_in"], rep["free_tokens_out"])
+    assert rep["avoided_spend"] == pytest.approx(expected)
+    assert rep["avoided_spend"] < tiers.estimate_cost(
+        tiers.by_name("fable"), rep["free_tokens_in"], rep["free_tokens_out"])

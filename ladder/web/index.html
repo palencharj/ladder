@@ -99,6 +99,14 @@
 
 <main>
   <section>
+    <h2>Is this worth it?</h2>
+    <div class="body">
+      <div id="verdict-banner"></div>
+      <pre id="verdict-text" style="margin-top:12px">loading&hellip;</pre>
+    </div>
+  </section>
+
+  <section>
     <h2>Spend</h2>
     <div class="body">
       <div class="cards" id="stat-cards"></div>
@@ -261,7 +269,19 @@ async function submitJob() {
   loadJobs();
 }
 
-function refresh() { loadHealth(); loadStats(); loadJobs(); }
+async function loadReport() {
+  const r = await get("/api/report");
+  const v = r.assessment.verdict;
+  const colour = { "worth-it": "var(--ok)", "marginal": "var(--warn)",
+                   "not-worth-it": "var(--fail)",
+                   "insufficient-data": "var(--muted)" }[v];
+  $("#verdict-banner").innerHTML =
+    `<span class="pill" style="background:${colour}">${esc(v)}</span> ` +
+    `<b style="margin-left:8px">${esc(r.assessment.headline)}</b>`;
+  $("#verdict-text").textContent = r.text;
+}
+
+function refresh() { loadHealth(); loadStats(); loadJobs(); loadReport(); }
 loadLadder().then(refresh);
 setInterval(refresh, 4000);
 </script>

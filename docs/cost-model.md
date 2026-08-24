@@ -173,6 +173,40 @@ way.
 
 Pull it with `ollama pull qwen2.5-coder:3b` (1.9 GB).
 
+## Is it worth it?
+
+`ladder_report` (or `/api/report`, or the top panel of the dashboard) answers
+that with a verdict: **worth-it**, **marginal**, **not-worth-it**, or
+**insufficient-data**.
+
+It is built to be able to say no. Three deliberate choices keep it honest,
+because a savings dashboard that can only report savings is marketing:
+
+**Avoided spend is priced at the cheapest paid tier, not the dearest.** Work
+that finished free at rung 0 is valued at Haiku rates, because Haiku is what
+you would actually have used. Pricing a docstring against Fable 5 is how tools
+like this flatter themselves. (`ladder_stats` still shows the top-rung
+comparison, clearly labelled as an upper bound — treat `ladder_report` as the
+real number.)
+
+**Failed cheap attempts are subtracted.** Trying cheap and missing is not free.
+`wasted_spend` is money spent on attempts that did not produce the final
+answer, and `net_saving` is `avoided_spend - wasted_spend`. It can be negative.
+
+**The free tier is charged for wall clock.** Free is only free if the work ran
+unattended. The report divides net saving by hours of local compute to get an
+implied hourly rate and judges that. A rate of a few cents per hour means rung
+0 is not paying for anyone's time, however free the tokens were.
+
+It also reports **first-try rate** per task kind — the fraction of jobs that
+succeed at their starting rung. That is the single best signal for retuning
+`TASK_RUNGS`: a kind that almost always escalates is starting too low and you
+are paying for a doomed attempt every time.
+
+Per-user rows let a team see who is using it and what each person's mix of free
+and paid work looks like. Identity comes from `LADDER_USER`, falling back to the
+OS username.
+
 ## Tuning the policy
 
 The whole cost policy is `TASK_RUNGS` in `ladder/tiers.py`:

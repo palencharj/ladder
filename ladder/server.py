@@ -13,7 +13,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import prompts, tiers
+from . import prompts, tiers, verdict
 from .pool import Swarm, Task, TierGate
 from .router import Router
 from .store import Store
@@ -77,6 +77,16 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
     @app.get("/api/stats")
     def stats():
         return jsonify(store.stats())
+
+    @app.get("/api/report")
+    def report():
+        days = request.args.get("days", type=int)
+        rep = store.report(days=days)
+        health = router.health()
+        rep["assessment"] = verdict.assess(
+            rep, using_cli_fallback=health["effective_paid_engine"] == "cli")
+        rep["text"] = verdict.render(rep, rep["assessment"])
+        return jsonify(rep)
 
     # ---------------- jobs ----------------
 
