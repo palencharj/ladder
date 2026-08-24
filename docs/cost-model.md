@@ -1,0 +1,168 @@
+# Cost model
+
+Every number here was measured, not estimated. Where a figure is
+hardware-specific it says so, and `scripts/bench.py` reproduces it on your box.
+
+## Rate card
+
+Anthropic first-party API rates, USD per million tokens.
+
+| Rung | Tier | Model | Input | Output | Context |
+|---|---|---|---|---|---|
+| 0 | local | `qwen3-coder:30b` | free | free | 256K |
+| 1 | haiku | `claude-haiku-4-5` | $1.00 | $5.00 | 200K |
+| 2 | sonnet | `claude-sonnet-5` | $3.00 | $15.00 | 1M |
+| 3 | sonnet-high | `claude-sonnet-5` | $3.00 | $15.00 | 1M |
+| 4 | opus | `claude-opus-5` | $5.00 | $25.00 | 1M |
+| 5 | fable | `claude-fable-5` | $10.00 | $50.00 | 1M |
+
+Rungs 2 and 3 are the same model at different `effort`. Buying more thinking on
+Sonnet is much cheaper than buying a bigger model, which is why the ladder has
+that rung at all — it is the cheapest way to add care before escalating to Opus.
+
+Sonnet 5 has an introductory rate of $2.00/$10.00 through 2026-08-31, so real
+spend before that date is below what the dashboard estimates. The estimate is
+deliberately conservative.
+
+## The `claude -p` overhead trap
+
+This is the single most important cost fact in the project.
+
+Without an `ANTHROPIC_API_KEY`, rungs 1–5 fall back to shelling out to
+`claude -p`. That authenticates against a Claude Code subscription — convenient,
+no key to provision — but every invocation reloads the entire Claude Code
+harness: system prompt, all built-in tool definitions, settings, and project
+context.
+
+Measured on the development machine, 2026-08-24, asking Haiku 4.5 to reply with
+a single word:
+
+| Invocation | cache write | cache read | output | cost |
+|---|---|---|---|---|
+| `claude -p` (first call) | 34,054 | 0 | 45 | $0.0683 |
+| `claude -p` (warm cache) | 9,976 | 24,909 | 50 | $0.0227 |
+| `claude -p` + `--setting-sources "" --strict-mcp-config` | 25,404 | 0 | 53 | **$0.0517** |
+
+Two things to take from that table.
+
+**The overhead is irreducible through the CLI.** The "lean" invocation stripped
+settings, MCP config, and the system prompt, and still carried 25k tokens of
+built-in tool definitions. It also broke the cache prefix, so a single lean call
+cost *more than double* the warm normal one. There is no flag that makes
+`claude -p` cheap for small tasks.
+
+**It dominates at swarm scale.** At $0.023 per call, 100 trivial tasks cost
+**$2.27 before any actual work happens**. The same 100 tasks over the raw API,
+at maybe 500 input and 200 output tokens each, cost about $0.15 — roughly
+**15× less**, and the gap widens the smaller the tasks get.
+
+So: set an API key if you intend to fan out. `ladder_health` reports which path
+is live, and warns when the fallback is in effect.
+
+The CLI engine is still the right tool for a small number of *tool-using* jobs.
+It gets file editing, bash, and search for free, which the raw API engine does
+not. The rule is: raw API for volume, CLI for jobs that need to touch the
+filesystem.
+
+## What local inference actually costs you
+
+Nothing in dollars. The cost is wall-clock, and it is hardware-dependent.
+
+Measured on an Intel Core Ultra 7 265U (12C/14T, 15W class, **no discrete
+GPU**), 64 GB DDR5-5600 (~90 GB/s theoretical), Ollama 0.32.14, CPU-only:
+
+| Model | Size | Generation | Prefill |
+|---|---|---|---|
+| `qwen3-coder:30b` (MoE) | 18 GB | 3.2–5.4 tok/s | 15.7–20.5 tok/s |
+| `qwen2.5-coder:7b` (dense) | 4.7 GB | 3.2 tok/s | 11.0 tok/s |
+
+Three findings that should change how you use rung 0:
+
+**Parameter count is not the bottleneck.** A 7B dense model generated no faster
+than a 30B mixture-of-experts. Generation is bound by memory bandwidth, and on
+a 15W part, by thermal headroom. Since the larger model is the same speed and
+substantially smarter, it is the default.
+
+**Throughput degrades under sustained load.** The 30B measured 5.4 tok/s cold
+and 3.2 tok/s after several minutes of continuous inference — consistent with
+clock throttling on a low-wattage laptop chip. Long swarm runs get slower, not
+faster.
+
+**Local concurrency does not increase generation throughput.** Measured on the
+same machine:
+
+| Concurrency | Aggregate generation | Prefill |
+|---|---|---|
+| serial | 5.6 tok/s | 17.7 tok/s |
+| 2-way | 5.3 tok/s | 470 tok/s |
+| 4-way | 5.8 tok/s | 425 tok/s |
+
+Total generation throughput is flat at ~5.5 tok/s no matter how many requests
+run at once — one stream already saturates the memory bus, so parallel jobs
+simply take turns. That is why rung 0 caps at 2 while Haiku caps at 12.
+
+Prefill behaves in the opposite way, jumping roughly 25× under concurrency,
+because prompt processing is compute-bound and Ollama batches it across
+requests. The practical consequence: **local fan-out is worthwhile for
+prompt-heavy, output-light work** — classification, triage, extraction,
+"does this file do X" — and worthless for anything that generates many tokens.
+If your swarm is mostly `classify` and `triage`, raising the rung-0 cap is
+reasonable. If it is generating code, leave it at 2.
+
+Run `python scripts/bench.py --concurrency 1 2 4` for your own figures.
+
+On a machine with a discrete GPU these numbers change completely and rung 0 may
+become fast enough for interactive use. Measure before assuming.
+
+### Practical reading
+
+At ~4 tok/s, a 200-token docstring takes about a minute. That is unusable in a
+loop a human is watching, and perfectly fine for fifty docstrings generated
+while you do something else. Use rung 0 for work you can walk away from.
+
+## Tuning the policy
+
+The whole cost policy is `TASK_RUNGS` in `ladder/tiers.py`:
+
+```python
+TASK_RUNGS = {
+    "docstring": 0,   # free
+    "review": 1,      # haiku
+    "implement": 2,   # sonnet
+    "debug": 3,       # sonnet, more thinking
+    "architect": 4,   # opus
+}
+```
+
+Two moves worth making after a week of real use:
+
+**Push kinds down when the cheap tier is good enough.** If your local model
+handles `test` acceptably, move it to rung 0 and stop paying for tests. Watch
+the escalation rate in `ladder_stats` — if a kind almost never escalates, it is
+starting too high.
+
+**Push kinds up when they always escalate.** If `implement` escalates from
+rung 2 to 3 most of the time, it is starting too low and you are paying for
+the wasted rung-2 attempt every time. Start it at 3.
+
+The escalation trail on every job records exactly which rungs were tried and
+why each failed, so this tuning is driven by data rather than guesswork.
+
+## Hard caps
+
+Escalation ceilings are the safety rail:
+
+- `max_rung: 0` — job is free or it fails. No API call is possible.
+- `max_rung` equal to the starting rung — no escalation at all.
+- Omitted — climbs to rung 5 if it has to.
+
+For a swarm, `max_rung` applies to every task unless a task overrides it. A
+1000-task swarm with `max_rung: 0` cannot cost anything, which makes it a safe
+way to try a bulk operation before committing money to it.
+
+## Reading the dashboard
+
+The **saved by the ladder** figure compares actual spend against what the same
+token volume would have cost entirely at rung 5. It is a ceiling comparison,
+not a claim that you would otherwise have used Fable for everything — treat it
+as a measure of how much work the cheap rungs absorbed, not as literal savings.

@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Job databases: local run state, never shared.
+*.db
+*.db-wal
+*.db-shm
+
+.pytest_cache/
+.ruff_cache/
+.env
+.vscode/
+.idea/

@@ -1,0 +1,41 @@
+[project]
+name = "ladder"
+version = "0.1.0"
+description = "Cheapest-tier-first agent orchestration: local models, Haiku, and an escalation ladder up to Fable 5"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+# Rungs 1-5 over the raw API. Without this, those rungs fall back to the
+# `claude -p` CLI, which is far more expensive per call.
+api = ["anthropic>=0.40"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+ladder-server = "ladder.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ladder*"]
+
+[tool.setuptools.package-data]
+ladder = ["web/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]

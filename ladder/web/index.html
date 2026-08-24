@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ladder</title>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f6f7f9; --border: #e2e5ea; --fg: #12141a;
+    --muted: #61687a; --accent: #2f6feb; --ok: #17803d; --fail: #c0392b;
+    --warn: #b06f00;
+    --r0: #17803d; --r1: #2f6feb; --r2: #7a4fd1; --r3: #b06f00;
+    --r4: #d1591f; --r5: #c0392b;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --border: #262b36; --fg: #e6e9ef;
+      --muted: #98a0b3; --accent: #5b8cff; --ok: #3fb950; --fail: #f85149;
+      --warn: #d29922;
+      --r0: #3fb950; --r1: #5b8cff; --r2: #a371f7; --r3: #d29922;
+      --r4: #f0883e; --r5: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--bg); z-index: 5;
+  }
+  h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .grow { flex: 1; }
+  main { padding: 20px; display: grid; gap: 20px; max-width: 1400px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  section > h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); margin: 0; padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .body { padding: 14px 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .card .n { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  td.wrap { white-space: normal; min-width: 260px; }
+  code, .mono { font-family: var(--mono); font-size: 12px; }
+  .pill {
+    display: inline-block; padding: 1px 7px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; color: #fff;
+  }
+  .r0 { background: var(--r0); } .r1 { background: var(--r1); }
+  .r2 { background: var(--r2); } .r3 { background: var(--r3); }
+  .r4 { background: var(--r4); } .r5 { background: var(--r5); }
+  .st-done { color: var(--ok); font-weight: 600; }
+  .st-failed { color: var(--fail); font-weight: 600; }
+  .st-running { color: var(--warn); font-weight: 600; }
+  .st-queued { color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .up { background: var(--ok); } .down { background: var(--fail); }
+  .muted { color: var(--muted); }
+  button {
+    font: inherit; padding: 6px 13px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:hover { filter: brightness(1.08); }
+  textarea, select, input {
+    font: inherit; width: 100%; padding: 7px 9px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+  }
+  textarea { font-family: var(--mono); font-size: 12px; resize: vertical; min-height: 76px; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 10px; }
+  label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.05em; }
+  details { border-top: 1px solid var(--border); }
+  details > summary { cursor: pointer; padding: 7px 10px; font-size: 12px; color: var(--muted); }
+  pre {
+    margin: 0; padding: 10px 14px; background: var(--bg); overflow-x: auto;
+    font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+    word-break: break-word; max-height: 380px; overflow-y: auto;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ladder <span>&mdash; cheapest-tier-first agent orchestration</span></h1>
+  <div class="grow"></div>
+  <div id="health" class="mono muted">checking&hellip;</div>
+  <button onclick="refresh()">Refresh</button>
+</header>
+
+<main>
+  <section>
+    <h2>Spend</h2>
+    <div class="body">
+      <div class="cards" id="stat-cards"></div>
+      <div class="scroll" style="margin-top:14px">
+        <table id="tier-table"><thead><tr>
+          <th>Rung</th><th>Tier</th><th>Attempts</th><th>Cost</th><th>Avg latency</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>New job</h2>
+    <div class="body">
+      <textarea id="prompt" placeholder="Describe the task. It starts on the cheapest tier its kind allows and only climbs if it fails."></textarea>
+      <div class="row">
+        <div><label>Kind</label><select id="kind"></select></div>
+        <div><label>Start rung</label><select id="rung"><option value="">auto (from kind)</option></select></div>
+        <div><label>Max rung</label><select id="maxrung"><option value="">no limit</option></select></div>
+        <div><label>Verify</label><select id="verify">
+          <option value="">none</option><option value="python">python parses</option>
+          <option value="json">json parses</option><option value="nonempty">non-empty</option>
+        </select></div>
+        <div style="display:flex;align-items:flex-end"><button class="primary" style="width:100%" onclick="submitJob()">Run</button></div>
+      </div>
+      <div id="job-msg" class="muted mono" style="margin-top:9px"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The ladder</h2>
+    <div class="scroll"><table id="ladder-table"><thead><tr>
+      <th>Rung</th><th>Tier</th><th>Engine</th><th>Model</th><th>Effort</th>
+      <th>Concurrency</th><th>$/Mtok in</th><th>$/Mtok out</th><th class="wrap">Use for</th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>Jobs</h2>
+    <div class="scroll"><table id="jobs-table"><thead><tr>
+      <th>Status</th><th>Rung</th><th class="wrap">Title</th><th>Kind</th>
+      <th>Tries</th><th>Cost</th><th>Job</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div id="job-detail"></div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => "$" + (n || 0).toFixed(5);
+const esc = (s) => (s == null ? "" : String(s).replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])));
+
+async function get(u) { const r = await fetch(u); return r.json(); }
+
+async function loadLadder() {
+  const d = await get("/api/tiers");
+  $("#ladder-table").querySelector("tbody").innerHTML = d.ladder.map((t) => `
+    <tr>
+      <td><span class="pill r${t.rung}">${t.rung}</span></td>
+      <td><b>${esc(t.name)}</b></td><td class="mono">${esc(t.engine)}</td>
+      <td class="mono">${esc(t.model)}</td><td class="mono">${esc(t.effort || "-")}</td>
+      <td>${t.concurrency}</td>
+      <td>${t.engine === "ollama" ? "free" : "$" + t.price_in}</td>
+      <td>${t.engine === "ollama" ? "free" : "$" + t.price_out}</td>
+      <td class="wrap muted">${esc(t.notes)}</td>
+    </tr>`).join("");
+
+  const kinds = Object.keys(d.task_rungs).sort();
+  $("#kind").innerHTML = kinds.map((k) =>
+    `<option value="${k}">${k} &rarr; rung ${d.task_rungs[k]}</option>`).join("");
+  $("#kind").value = "implement";
+
+  const opts = d.ladder.map((t) => `<option value="${t.rung}">${t.rung} — ${t.name}</option>`).join("");
+  $("#rung").innerHTML = '<option value="">auto (from kind)</option>' + opts;
+  $("#maxrung").innerHTML = '<option value="">no limit</option>' + opts;
+}
+
+async function loadHealth() {
+  const h = await get("/api/health");
+  const bit = (ok, label) =>
+    `<span class="dot ${ok ? "up" : "down"}"></span>${label}`;
+  $("#health").innerHTML = [
+    bit(h.ollama.ok, "ollama"),
+    bit(h.anthropic_api.ok, "api"),
+    bit(h.claude_cli.ok, "cli"),
+    `<span class="muted">paid&rarr;${esc(h.effective_paid_engine || "none")}</span>`,
+  ].join(" &nbsp; ");
+}
+
+async function loadStats() {
+  const s = await get("/api/stats");
+  $("#stat-cards").innerHTML = `
+    <div class="card"><div class="n">${s.totals.jobs}</div><div class="l">jobs</div></div>
+    <div class="card"><div class="n">${fmt(s.totals.cost)}</div><div class="l">actual spend</div></div>
+    <div class="card"><div class="n">${fmt(s.fable_equivalent_cost)}</div><div class="l">if all at rung 5</div></div>
+    <div class="card"><div class="n" style="color:var(--ok)">${fmt(s.savings_vs_fable)}</div><div class="l">saved by the ladder</div></div>
+    <div class="card"><div class="n">${(s.totals.tout || 0).toLocaleString()}</div><div class="l">output tokens</div></div>`;
+  $("#tier-table").querySelector("tbody").innerHTML = s.by_tier.map((r) => `
+    <tr><td><span class="pill r${r.rung}">${r.rung}</span></td>
+    <td><b>${esc(r.tier)}</b></td><td>${r.n}</td><td>${fmt(r.cost)}</td>
+    <td>${Math.round(r.avg_ms).toLocaleString()} ms</td></tr>`).join("")
+    || '<tr><td colspan="5" class="muted">No attempts yet.</td></tr>';
+}
+
+async function loadJobs() {
+  const jobs = await get("/api/jobs?limit=60");
+  $("#jobs-table").querySelector("tbody").innerHTML = jobs.map((j) => {
+    const rung = j.final_rung != null ? j.final_rung : j.start_rung;
+    const climbed = j.final_rung != null && j.final_rung > j.start_rung
+      ? ` <span class="muted mono">(from ${j.start_rung})</span>` : "";
+    return `<tr>
+      <td class="st-${j.status}">${j.status}</td>
+      <td><span class="pill r${rung}">${rung}</span>${climbed}</td>
+      <td class="wrap">${esc((j.title || "").slice(0, 100))}</td>
+      <td class="mono">${esc(j.kind)}</td><td>${j.attempts}</td>
+      <td>${fmt(j.cost_usd)}</td>
+      <td><button onclick="showJob('${j.id}')">view</button></td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="7" class="muted">No jobs yet.</td></tr>';
+}
+
+async function showJob(id) {
+  const j = await get("/api/job/" + id);
+  const trail = (j.attempt_log || []).map((a) =>
+    `  attempt ${a.n}: rung ${a.rung} ${a.tier} (${a.model}) ` +
+    `${a.ok ? "ok" : "FAIL"} ${a.latency_ms}ms ${fmt(a.cost_usd)}` +
+    (a.error ? ` — ${a.error}` : "")).join("\n");
+  $("#job-detail").innerHTML = `
+    <details open><summary>${esc(j.title)} — ${esc(j.status)} — ${fmt(j.cost_usd)}</summary>
+    <pre>ESCALATION TRAIL
+${esc(trail || "  (none)")}
+
+PROMPT
+${esc(j.prompt)}
+
+RESULT
+${esc(j.result || j.error || "(pending)")}</pre></details>`;
+  $("#job-detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function submitJob() {
+  const prompt = $("#prompt").value.trim();
+  if (!prompt) { $("#job-msg").textContent = "Prompt is required."; return; }
+  const body = { prompt, kind: $("#kind").value };
+  if ($("#rung").value !== "") body.rung = +$("#rung").value;
+  if ($("#maxrung").value !== "") body.max_rung = +$("#maxrung").value;
+  if ($("#verify").value !== "") body.verify = $("#verify").value;
+
+  $("#job-msg").textContent = "submitting…";
+  const r = await fetch("/api/job", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!r.ok) { $("#job-msg").textContent = "error: " + (d.error || r.status); return; }
+  $("#job-msg").textContent =
+    `queued ${d.job_id} starting at rung ${d.start_rung} (${d.start_tier})`;
+  $("#prompt").value = "";
+  loadJobs();
+}
+
+function refresh() { loadHealth(); loadStats(); loadJobs(); }
+loadLadder().then(refresh);
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

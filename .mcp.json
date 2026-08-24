@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ladder": {
+      "command": "python",
+      "args": ["mcp/ladder_mcp.py"]
+    }
+  }
+}
