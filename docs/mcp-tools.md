@@ -1,6 +1,6 @@
 # MCP tool reference
 
-Seven tools. All are available in Claude Code once the server is registered.
+Eight tools. All are available in Claude Code once the server is registered.
 
 Register at user scope (available in every project):
 
@@ -25,11 +25,13 @@ Engine health:
   OK    claude_cli: claude CLI at C:\...\claude.EXE
   local models: qwen3-coder:30b, qwen2.5-coder:7b
   paid rungs (1-5) will use: cli
-  NOTE: the CLI fallback adds ~25-35k tokens of harness overhead per call.
+  NOTE: each `claude -p` call carries ~35k tokens of harness overhead,
+  charged per invocation however small the task.
 ```
 
-Call this first when anything behaves unexpectedly. The most common surprise —
-rungs 1–5 costing far more than the rate card suggests — is visible here.
+Call this first when anything behaves unexpectedly. It reports which paid path
+is actually in effect, and whether the local tier is reachable at all — if
+Ollama is down, every job silently becomes a paid one.
 
 ---
 
@@ -146,14 +148,60 @@ Repeated patterns like this are the signal to retune `TASK_RUNGS`.
 
 ---
 
+## `ladder_report`
+
+**The tool that answers "is this worth running".** Measured in subscription
+allowance rather than dollars, because on a prepaid plan nobody receives a bill
+and the thing that actually binds is quota.
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `days` | int | Only consider jobs from the last N days. Omit for all time. |
+
+```
+=== Is Ladder worth it? (all time) ===
+WORTH IT: 27 of 33 requests never spent allowance (82%), stretching the plan 5.5x.
+
+  SUBSCRIPTION ALLOWANCE
+    requests deflected   27 of 33  (82%)
+    tokens deflected     956k
+    tokens spent         88k   across 3 CLI calls
+    quota multiplier     5.5x
+    saved by batching    105k   (6 tasks in 3 calls)
+
+  WHAT IT COST
+    local compute        0.60 h
+    per deflection       1.3 min
+```
+
+Four verdicts: **worth-it**, **marginal**, **not-worth-it**, and
+**insufficient-data** (under 20 finished jobs it refuses to conclude rather
+than read noise). It is built to be able to say no — if the local tier deflects
+almost nothing, that is *worse* than going straight to the CLI, because you
+waited and spent the allowance anyway, and it says so.
+
+The two numbers to act on:
+
+- **Deflection rate per task kind.** A kind sitting near 0% is starting too low
+  and paying for a doomed local attempt every time. Move it up in `TASK_RUNGS`.
+  A kind at 100% may be starting too high — try it a rung lower.
+- **Unbatched paid tasks.** Every one is its own ~35k invocation. If that count
+  is climbing, pass `batch=true`.
+
+Per-user rows let a team see who is using it and how their free/paid mix looks.
+Identity comes from `LADDER_USER`, falling back to the OS username.
+
+---
+
 ## `ladder_stats`
 
-No parameters. Spend summary, per-tier breakdown, and the comparison against
-running the same token volume entirely at rung 5.
+No parameters. Raw per-tier breakdown: attempts, notional cost, and average
+latency per rung. Useful for spotting a slow tier.
 
-Treat the savings figure as a measure of how much work the cheap rungs
-absorbed, not as literal money saved — it assumes the alternative was Fable 5
-for everything.
+For the question of whether the tool is earning its keep, use `ladder_report`
+instead — `ladder_stats` prices avoided work against the *top* rung, which
+flatters the result and assumes you would otherwise have sent a docstring to
+Fable 5.
 
 ---
 

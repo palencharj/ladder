@@ -71,12 +71,14 @@ Then start the dashboard:
 python -m ladder.server
 ```
 
-`http://127.0.0.1:5151` — live jobs, escalation trails, per-tier spend, and a
-running tally of what the ladder saved you versus sending everything to rung 5.
+`http://127.0.0.1:5151` — a worth-it verdict, live jobs, escalation trails, and
+how much subscription allowance the local tier and batching have preserved.
+
+**Restart Claude Code afterwards** so it picks up the MCP server.
 
 ## Using it from Claude Code
 
-Once registered, seven `ladder_*` tools are available.
+Once registered, eight `ladder_*` tools are available.
 
 **One task, cheapest tier that works:**
 

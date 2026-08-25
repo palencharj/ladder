@@ -991,3 +991,86 @@ def test_validation_tolerates_malformed_task_entries():
     m = _mcp()
     assert m.validate_args(_tool("ladder_swarm"), {"tasks": ["not a dict"]}) is None
     assert m.validate_args(_tool("ladder_swarm"), {"tasks": "not a list"}) is None
+
+
+# --------------------------------------------------------------------------
+# Truncation
+#
+# max_tokens is one value for the whole job, so escalating on truncation could
+# never fix it: the next rung up gets the same cap and hits the same wall,
+# having cost a rung. Truncation retries at the same rung with more budget.
+# --------------------------------------------------------------------------
+
+class Truncating(FakeEngine):
+    """Truncates until the budget reaches `needs`, then answers."""
+
+    def __init__(self, needs: int):
+        super().__init__(succeed_at_rung=0)
+        self.needs = needs
+        self.budgets: list[int] = []
+        self.rungs: list[int] = []
+
+    def run(self, tier, system, prompt, max_tokens=8000):
+        self.budgets.append(max_tokens)
+        self.rungs.append(tier.rung)
+        if max_tokens < self.needs:
+            return Result(text="half an ans", ok=True, engine="fake",
+                          model=tier.model, rung=tier.rung, stop_reason="length")
+        return Result(text="complete answer", ok=True, engine="fake",
+                      model=tier.model, rung=tier.rung, stop_reason="end_turn")
+
+
+def test_truncation_retries_the_same_rung_with_more_budget(store):
+    eng = Truncating(needs=400)
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", max_tokens=100)
+    assert out["ok"] and out["result"] == "complete answer"
+    assert eng.budgets == [100, 200, 400], "budget must double until sufficient"
+    assert eng.rungs == [0, 0, 0], "truncation must NOT climb the ladder"
+    assert out["rung"] == 0
+
+
+def test_truncation_does_not_count_as_an_escalation(store):
+    """Same-rung retries would otherwise inflate the number people tune on."""
+    eng = Truncating(needs=400)
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", max_tokens=100)
+    assert out["escalations"] == 0
+    assert len(out["trail"]) == 3, "the retries are still recorded"
+
+
+def test_truncation_at_the_ceiling_is_a_failure_not_a_short_answer(store):
+    """A half-finished answer reporting success is the silent-wrongness trap."""
+    from ladder.router import MAX_TOKENS_CEILING
+
+    eng = Truncating(needs=MAX_TOKENS_CEILING * 10)
+    out = router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", rung=0, max_rung=0, max_tokens=1000)
+    assert not out["ok"]
+    assert "truncated" in out["error"] and "incomplete" in out["error"]
+
+
+def test_budget_growth_is_bounded(store):
+    from ladder.router import MAX_TOKENS_CEILING
+
+    eng = Truncating(needs=MAX_TOKENS_CEILING * 10)
+    router_with(eng, store=store).run_job(
+        prompt="p", kind="classify", rung=0, max_rung=0, max_tokens=1000)
+    assert max(eng.budgets) <= MAX_TOKENS_CEILING
+
+
+def test_a_genuine_failure_still_escalates(store):
+    """Only truncation stays put; real failures must still climb."""
+    eng = FakeEngine(succeed_at_rung=2)
+    out = router_with(eng, store=store).run_job(prompt="p", kind="classify")
+    assert out["ok"] and out["rung"] == 2 and out["escalations"] == 2
+
+
+def test_was_truncated_recognises_every_engine_wording():
+    from ladder.engines.base import Result as R
+    from ladder.router import was_truncated
+
+    assert was_truncated(R(text="", stop_reason="length"))      # ollama
+    assert was_truncated(R(text="", stop_reason="max_tokens"))  # anthropic / cli
+    assert not was_truncated(R(text="", stop_reason="end_turn"))
+    assert not was_truncated(R(text="", stop_reason=""))

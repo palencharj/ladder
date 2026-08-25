@@ -157,6 +157,25 @@ run for over an hour. That is the free tier working as intended, not a hang.
 Pass a smaller `max_tokens` when you want a bound — it tightens the deadline
 proportionally.
 
+### Truncation is answered with budget, not a bigger model
+
+If an attempt stops because it hit `max_tokens`, Ladder retries at the **same
+rung** with double the budget rather than escalating.
+
+Escalating would be strictly wrong. `max_tokens` is one value for the whole
+job, so a dearer model handed the same cap hits exactly the same wall -- you
+would spend a rung to reproduce the failure. Truncation is a budget problem and
+only more budget fixes it.
+
+The budget doubles up to a 32,000-token ceiling. An answer still truncated
+there is rejected rather than returned, because a half-finished answer reported
+as success is the same silent-wrongness trap that structural verifiers fall
+into.
+
+Same-rung retries are recorded in the escalation trail but do **not** count as
+escalations, since that number is what you tune `TASK_RUNGS` against and
+inflating it would point the tuning the wrong way.
+
 ## Picking a smaller local model per task
 
 Rung 0's default is the 30B, because for code generation it is no slower than a

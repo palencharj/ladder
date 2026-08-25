@@ -49,7 +49,7 @@ try {
         Write-Host "    Ollama not found." -ForegroundColor Yellow
         Write-Host "    Install from https://ollama.com/download, then re-run." -ForegroundColor Yellow
         Write-Host "    Ladder still works without it, but rung 0 is unavailable" -ForegroundColor Yellow
-        Write-Host "    and every job costs money." -ForegroundColor Yellow
+        Write-Host "    and every request spends subscription allowance." -ForegroundColor Yellow
     }
     else {
         Write-Host "    $(& ollama --version 2>&1 | Select-Object -First 1)"
@@ -73,16 +73,22 @@ try {
     }
 
     # ---- API credential --------------------------------------------------
-    Say "Checking Anthropic credential (rungs 1-5)"
+    Say "Checking how rungs 1-5 will run"
     if ($env:ANTHROPIC_API_KEY) {
-        Write-Host "    ANTHROPIC_API_KEY is set - rungs 1-5 use the raw API (cheap)."
+        Write-Host "    ANTHROPIC_API_KEY is set - rungs 1-5 use the raw API."
     }
     else {
-        Write-Host "    No ANTHROPIC_API_KEY." -ForegroundColor Yellow
-        Write-Host "    Rungs 1-5 will fall back to the 'claude -p' CLI, which carries" -ForegroundColor Yellow
-        Write-Host "    ~25-35k tokens of harness overhead per call. That is roughly" -ForegroundColor Yellow
-        Write-Host "    50x the cost of the same task over the API." -ForegroundColor Yellow
-        Write-Host "    To fix:  setx ANTHROPIC_API_KEY sk-ant-..." -ForegroundColor Yellow
+        Write-Host "    No ANTHROPIC_API_KEY: rungs 1-5 will use 'claude -p'"
+        Write-Host "    against your Claude Code subscription. That is the normal"
+        Write-Host "    setup for a prepaid plan - there is no bill to worry about."
+        Write-Host ""
+        Write-Host "    What to watch instead is allowance. Each 'claude -p' call"
+        Write-Host "    spends ~35k tokens of harness overhead before touching your"
+        Write-Host "    task, charged per invocation however small the work. Two"
+        Write-Host "    levers keep that down:"
+        Write-Host "      - let mechanical work run at rung 0, where it costs nothing"
+        Write-Host "      - pass batch=true to ladder_swarm for bulk paid work"
+        Write-Host "    Run ladder_report to see how well both are working."
     }
 
     # ---- Verify ----------------------------------------------------------
@@ -104,12 +110,21 @@ try {
     }
     else {
         $mcpPath = Join-Path $root "mcp\ladder_mcp.py"
-        & claude mcp add ladder --scope user -- python $mcpPath 2>&1 | Out-Null
+        # PowerShell 5.1 turns a native command's stderr into ErrorRecords, so
+        # a benign "already exists" prints as a red NativeCommandError and looks
+        # like a crash. Capture the output as plain text instead.
+        $addOutput = & cmd /c "claude mcp add ladder --scope user -- python `"$mcpPath`" 2>&1"
         if ($LASTEXITCODE -eq 0) {
             Write-Host "    Registered as 'ladder' at user scope."
         }
+        elseif ($addOutput -match "already exists") {
+            Write-Host "    Already registered at user scope - nothing to do."
+        }
         else {
-            Write-Host "    Already registered, or registration declined." -ForegroundColor Yellow
+            Write-Host "    Could not register automatically:" -ForegroundColor Yellow
+            Write-Host "      $addOutput" -ForegroundColor Yellow
+            Write-Host "    A .mcp.json is checked in, so Claude Code picks it up" -ForegroundColor Yellow
+            Write-Host "    when run from this directory regardless." -ForegroundColor Yellow
         }
     }
 
@@ -117,8 +132,11 @@ try {
     Say "Done." "Green"
     Write-Host "  Dashboard:  python -m ladder.server"
     Write-Host "              http://127.0.0.1:5151"
-    Write-Host "  Benchmark:  python scripts/bench.py"
-    Write-Host "  From Claude Code, the ladder_* tools are now available."
+    Write-Host "  Benchmark:  python scripts/bench.py   (know your local speed)"
+    Write-Host ""
+    Write-Host "  RESTART Claude Code to pick up the ladder_* tools." -ForegroundColor Cyan
+    Write-Host "  Then try:  'Use ladder_health to check the engines'"
+    Write-Host "             'Use ladder_report to see if this is worth running'"
 }
 finally {
     Pop-Location

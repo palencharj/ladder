@@ -12,6 +12,20 @@ A "failure" is any of: engine error, empty output, model refusal, or a
 caller-supplied verifier returning False. That last one is what makes
 escalation useful rather than decorative -- for example, checking that
 generated Python actually parses before accepting it.
+
+Truncation is the exception
+---------------------------
+Running out of output budget is a *budget* failure, not a capability failure,
+and escalating for it would be strictly wrong: a dearer model handed the same
+output cap hits the same wall, and you have paid a rung for the privilege.
+Worse, ``max_tokens`` is one value for the whole job, so the climb could never
+have fixed it.
+
+So a truncated attempt retries at the **same** rung with double the budget, up
+to a ceiling. Only real failures climb. An answer still truncated at the
+ceiling is rejected rather than returned, because a half-finished answer that
+reports success is the same silent-wrongness trap that structural verifiers
+fall into.
 """
 
 from __future__ import annotations
@@ -65,6 +79,30 @@ VERIFIERS: dict[str, Verifier] = {
     "json": json_parses,
     "nonempty": nonempty,
 }
+
+# Stop reasons meaning "I ran out of output budget", per engine. Ollama says
+# "length"; the Anthropic API and the CLI say "max_tokens".
+TRUNCATION_STOP_REASONS = frozenset({"length", "max_tokens"})
+
+# How much more budget a rung gets after a truncated attempt, and the hard cap.
+TRUNCATION_GROWTH = 2
+MAX_TOKENS_CEILING = 32_000
+
+
+def _rungs_climbed(trail: list[dict]) -> int:
+    """How many rungs a job actually climbed.
+
+    Not `len(trail) - 1`: a truncation retry adds a trail entry at the *same*
+    rung, and counting those as escalations would overstate how often the
+    ladder had to reach for a dearer tier -- exactly the number people tune
+    TASK_RUNGS against.
+    """
+    return max(0, len({a["rung"] for a in trail}) - 1)
+
+
+def was_truncated(res: Result) -> bool:
+    """Did this attempt fail because it hit the output cap rather than the task?"""
+    return (res.stop_reason or "").lower() in TRUNCATION_STOP_REASONS
 
 # Adjudication prompt. Deliberately asks for a verdict token first so the
 # answer can be parsed from a very short generation, and deliberately tells the
@@ -291,14 +329,50 @@ class Router:
 
         trail: list[dict] = []
         last: Result | None = None
+        budget = max_tokens
 
-        for n, rung_n in enumerate(range(start_tier.rung, ceiling + 1), start=1):
+        n = 0
+        for rung_n in range(start_tier.rung, ceiling + 1):
             # The override applies to the starting rung only; every rung above
             # it uses that rung's standard model.
             tier = start_tier if rung_n == start_tier.rung else tiers.by_rung(rung_n)
-            res = self.engine_for(tier).run(tier, system, prompt,
-                                            max_tokens=max_tokens)
-            last = res
+
+            # Truncation is a *budget* failure, not a capability failure, so it
+            # is answered with more budget at the same rung rather than by
+            # escalating. Climbing would be strictly wrong: a dearer model with
+            # the same output cap hits the same wall, and you have paid for the
+            # privilege. Retry here until the budget is genuinely the problem.
+            while True:
+                n += 1
+                res = self.engine_for(tier).run(tier, system, prompt,
+                                                max_tokens=budget)
+                last = res
+                if not (was_truncated(res) and budget < MAX_TOKENS_CEILING):
+                    break
+                grown = min(budget * TRUNCATION_GROWTH, MAX_TOKENS_CEILING)
+                res.ok = False
+                res.error = (
+                    f"output truncated at max_tokens={budget}; "
+                    f"retrying same rung with {grown}"
+                )
+                if self.store and job_id:
+                    self.store.add_attempt(job_id, n, tier, res)
+                trail.append({
+                    "rung": tier.rung, "tier": tier.name, "model": res.model,
+                    "engine": res.engine, "ok": False, "cost_usd": res.cost_usd,
+                    "latency_ms": res.latency_ms, "error": res.error,
+                    "adjudication": "",
+                })
+                budget = grown
+
+            # A truncated answer that survived the loop above hit the ceiling.
+            # It is incomplete by definition, so do not let it pass silently.
+            if res.ok and was_truncated(res):
+                res.ok = False
+                res.error = (
+                    f"output truncated at the {MAX_TOKENS_CEILING} token ceiling; "
+                    "the answer is incomplete"
+                )
 
             if res.ok and checker and not checker(res.text):
                 res.ok = False
@@ -335,7 +409,7 @@ class Router:
                     "job_id": job_id, "ok": True, "result": res.text,
                     "rung": tier.rung, "tier": tier.name, "model": res.model,
                     "cost_usd": sum(a["cost_usd"] for a in trail),
-                    "escalations": len(trail) - 1, "trail": trail,
+                    "escalations": _rungs_climbed(trail), "trail": trail,
                 }
 
         err = last.error if last else "no attempt ran"
@@ -345,5 +419,5 @@ class Router:
         return {
             "job_id": job_id, "ok": False, "result": "", "error": err,
             "rung": ceiling, "cost_usd": sum(a["cost_usd"] for a in trail),
-            "escalations": len(trail) - 1, "trail": trail,
+            "escalations": _rungs_climbed(trail), "trail": trail,
         }
