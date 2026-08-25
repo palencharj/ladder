@@ -11,7 +11,30 @@ default for any task whose kind we recognise is the lowest rung in TASK_RUNGS.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+
+# Rung 0's model, overridable globally without editing code:
+#
+#     setx LADDER_LOCAL_MODEL qwen2.5-coder:3b     (Windows, new shells)
+#     export LADDER_LOCAL_MODEL=qwen2.5-coder:3b   (bash)
+#
+# On a machine without a discrete GPU this is the ONLY lever that meaningfully
+# changes tokens/sec. Generation here is memory-bandwidth-bound rather than
+# compute-bound -- measured: a 7B dense model and a 30B mixture-of-experts
+# generated at an identical 3.2 tok/s, which only happens when both are waiting
+# on the same memory bus. More compute cannot fix that, and neither can an NPU,
+# which shares the very same system RAM. A smaller model can, because it moves
+# fewer bytes per token.
+#
+# Measured on one classification prompt, both answers correct:
+#   qwen2.5-coder:3b    1.7s
+#   qwen3-coder:30b    33.8s
+#
+# The 30B remains the default because for *code generation* it is no slower and
+# considerably smarter. Switch to the 3B when you want throughput on
+# short-output work: classification, triage, extraction, routing decisions.
+DEFAULT_LOCAL_MODEL = os.environ.get("LADDER_LOCAL_MODEL", "qwen3-coder:30b")
 
 
 @dataclass(frozen=True)
@@ -46,7 +69,7 @@ LADDER: tuple[Tier, ...] = (
         rung=0,
         name="local",
         engine="ollama",
-        model="qwen3-coder:30b",
+        model=DEFAULT_LOCAL_MODEL,
         effort=None,
         concurrency=2,
         price_in=0.0,

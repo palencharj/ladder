@@ -164,6 +164,8 @@ TOOLS = [
                 "rung": {"type": "integer", "description": "Starting rung. Default 1 (haiku). 0 is free."},
                 "max_rung": {"type": "integer", "description": "Escalation ceiling. Default: no escalation past the starting rung."},
                 "focus": {"type": "string", "description": "Optional steer, e.g. 'concurrency safety' or 'error handling'."},
+                "max_tokens": {"type": "integer", "description": "Output cap per file. Default 8000. Raise it for large files -- a review cut off mid-finding is worse than no review."},
+                "model": {"type": "string", "description": "Model override at the starting rung. At rung 0 a smaller local model is dramatically faster on hardware without a discrete GPU."},
                 "wait": {"type": "boolean", "description": "Block for results. Default true."},
             },
             "required": ["paths"],
@@ -387,7 +389,8 @@ def t_review(args: dict) -> dict:
             title=f"review {f.name}",
             rung=rung,
             max_rung=args.get("max_rung", rung),
-            max_tokens=4000,
+            max_tokens=int(args.get("max_tokens", 8000)),
+            model=args.get("model"),
         ))
 
     if not tasks:
