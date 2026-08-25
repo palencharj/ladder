@@ -189,8 +189,30 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
     return app
 
 
+def port_is_taken(host: str, port: int) -> bool:
+    """Is something already listening here?
+
+    Worth checking explicitly, because on Windows this does not fail on its
+    own. Werkzeug sets SO_REUSEADDR, which Linux treats as "reuse a closed
+    socket" but Windows treats as "take the port from whoever has it" -- so a
+    second dashboard binds successfully and requests are answered by whichever
+    process wins the race.
+
+    That is genuinely nasty in practice: an old server left running from an
+    earlier session keeps answering, so new routes 404 and the numbers shown
+    come from a database that may not even exist any more. Refusing to start is
+    far kinder than silently serving stale results.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex((host, port)) == 0
+
+
 def main() -> None:
     import argparse
+    import sys
 
     ap = argparse.ArgumentParser(description="Ladder orchestration server")
     ap.add_argument("--host", default="127.0.0.1")
@@ -198,7 +220,20 @@ def main() -> None:
     ap.add_argument("--db", default=None)
     ap.add_argument("--cwd", default=None,
                     help="working directory for tool-using CLI jobs")
+    ap.add_argument("--force", action="store_true",
+                    help="start even if the port already has a listener")
     args = ap.parse_args()
+
+    if port_is_taken(args.host, args.port) and not args.force:
+        sys.exit(
+            f"Something is already listening on {args.host}:{args.port}.\n"
+            "That is probably an older Ladder dashboard still running; on "
+            "Windows a second one can bind the same port and you would get "
+            "whichever answers first, including stale routes and a stale "
+            "database.\n"
+            "Stop it, use --port to pick another, or pass --force if you are "
+            "certain."
+        )
 
     app = create_app(db_path=args.db, cwd=args.cwd)
     print(f"Ladder dashboard -> http://{args.host}:{args.port}")

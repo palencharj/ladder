@@ -1074,3 +1074,38 @@ def test_was_truncated_recognises_every_engine_wording():
     assert was_truncated(R(text="", stop_reason="max_tokens"))  # anthropic / cli
     assert not was_truncated(R(text="", stop_reason="end_turn"))
     assert not was_truncated(R(text="", stop_reason=""))
+
+
+# --------------------------------------------------------------------------
+# Port collision
+#
+# Found live: two dashboards were listening on 5151, one 405 minutes old. On
+# Windows Werkzeug's SO_REUSEADDR means a second bind succeeds and steals the
+# port rather than failing, so the older process kept answering -- 404ing routes
+# added since, from a database that had been deleted.
+# --------------------------------------------------------------------------
+
+def test_port_probe_detects_a_listener():
+    import socket
+
+    from ladder.server import port_is_taken
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        host, port = srv.getsockname()
+        assert port_is_taken(host, port)
+
+    # Once closed, the same port must read as free.
+    assert not port_is_taken(host, port)
+
+
+def test_port_probe_is_false_for_a_free_port():
+    import socket
+
+    from ladder.server import port_is_taken
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    assert not port_is_taken("127.0.0.1", port)
