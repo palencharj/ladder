@@ -6,6 +6,7 @@ Uses only the standard library so the free tier has no pip dependencies.
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 
@@ -17,7 +18,8 @@ DEFAULT_HOST = "http://127.0.0.1:11434"
 # function of how many tokens it was asked for and how slow the box is.
 #
 # The original fixed 900s was actively harmful: the default max_tokens of 8000,
-# at the 3.2-5.6 tok/s this class of hardware manages, needs 1400-2500s. Every
+# at the ~3 tok/s this hardware falls to once thermally throttled, needs well
+# over 2000s. Every
 # rung-0 job that genuinely filled its budget timed out, the router read the
 # timeout as a failure, and the job escalated to a PAID tier. The free tier was
 # quietly billing you.
@@ -29,6 +31,25 @@ MIN_TOKENS_PER_SEC = 2.0   # slower than any machine measured; a floor, not an e
 LOAD_OVERHEAD_SEC = 120    # cold model load from disk, plus prompt prefill
 MIN_TIMEOUT_SEC = 300
 MAX_TIMEOUT_SEC = 7200     # backstop so a wedged server cannot hang a swarm forever
+
+# How long Ollama keeps the model resident in RAM after a request.
+#
+# This is the single biggest lever on *perceived* rung-0 speed, and it is not
+# about tokens per second at all. Measured on this machine with the same
+# two-token classification:
+#
+#   qwen3-coder:30b, cold   ~33 s   (paging 18 GB in from disk)
+#   qwen3-coder:30b, warm     0.3 s
+#
+# A hundredfold difference, entirely residency. An earlier round of measurement
+# mistook that load cost for the 3B being twenty times faster to generate; warm,
+# the two are within 7% of each other.
+#
+# Ollama's own default is 5 minutes, which is far too short for a tool used in
+# bursts: walk away for a coffee and the next job pays the full reload. Thirty
+# minutes keeps it resident across a working session. Set LADDER_KEEP_ALIVE to
+# "-1" to hold it indefinitely, or something short to reclaim the RAM sooner.
+KEEP_ALIVE = os.environ.get("LADDER_KEEP_ALIVE", "30m")
 
 
 class OllamaEngine(Engine):
@@ -81,6 +102,10 @@ class OllamaEngine(Engine):
                 {"role": "user", "content": prompt},
             ],
             "options": {"num_predict": max_tokens, "temperature": 0.2},
+            # Keep the model resident. On a cold start an 18 GB model costs
+            # ~33s to page in, against 0.3s warm -- residency dominates
+            # perceived speed far more than tokens/sec does.
+            "keep_alive": KEEP_ALIVE,
         }
         deadline = self._timeout_for(max_tokens)
         try:

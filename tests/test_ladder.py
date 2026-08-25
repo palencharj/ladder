@@ -627,7 +627,9 @@ def test_verdict_flags_slow_deflection_as_marginal():
 
     a = verdict.assess(_report(seconds_per_deflection=1800))
     assert a["verdict"] == "marginal"
-    assert any("3b" in x for x in a["actions"])
+    assert any("KEEP_ALIVE" in x for x in a["actions"]), (
+        "residency is the real lever for slow local work, not model size"
+    )
 
 
 def test_verdict_says_worth_it_when_deflection_is_cheap_and_common():

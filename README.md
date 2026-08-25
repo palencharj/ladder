@@ -109,18 +109,27 @@ because CPU inference is near zero-sum, while Haiku jobs fan out 12-wide.
 One job per file, concurrent, at rung 1 by default. Pass `rung: 0` to make an
 entire review pass free.
 
-**Pick a smaller local model for short answers:**
+**Choose a different local model when it earns its place:**
 
-Rung 0 defaults to the 30B because for code generation it is no slower than a
-7B and much smarter. For one-word answers that flips — a 3B classifies in
-**1.7s** where the 30B takes **33.8s**, both free and both correct:
+Warm, the 3B and the 30B are within 7% of each other (37.8 vs 35.4 tok/s), so
+switching models is *not* the throughput lever it looks like. The 3B wins on
+load time and footprint — 1.9 GB against 18 GB — which matters when RAM is
+contended or the model will often be cold.
+
+Per job:
 
 ```
 ladder_run(prompt="...", kind="classify", model="qwen2.5-coder:3b", max_rung=0)
 ```
 
-The override applies to the starting rung only, keeping that rung's engine and
-pricing. Any escalation above it uses each rung's standard model.
+Or globally, for every session:
+
+```bash
+setx LADDER_LOCAL_MODEL qwen2.5-coder:3b
+```
+
+The per-job override applies to the starting rung only, keeping that rung's
+engine and pricing. Any escalation above it uses each rung's standard model.
 
 **Make a cheap tier trustworthy:**
 
@@ -180,14 +189,21 @@ move it to rung 0 and stop paying for tests.
 
 ## Two things worth knowing before you rely on this
 
-**Local speed is about your hardware, not the model.** Benchmarked on the
-development machine (Intel Core Ultra 7 265U, no discrete GPU, DDR5-5600):
-generation ran at **3–5 tokens/sec**, and a 7B model was no faster than a 30B
-mixture-of-experts. Generation is bound by memory bandwidth and thermal
-headroom, not parameter count — which is why the larger, smarter model is the
-default. Run `python scripts/bench.py` to get your own numbers. Under about 10
-tok/s, treat rung 0 as batch work you walk away from, not something a human
-waits on. It is still free, which is the whole point.
+**Local speed is about bandwidth and residency, not model size.** Benchmarked
+on the development machine (Intel Core Ultra 7 265U, no discrete GPU,
+DDR5-5600): the 30B mixture-of-experts generates at **11.5 tok/s**, nearly
+double the 6.6 tok/s of a 7B dense model, because MoE activates only ~3B
+parameters per token. Speed tracks *active* parameters — the signature of a
+memory-bandwidth limit rather than a compute one. That is also why an NPU does
+not help here: it shares the same system RAM.
+
+The bigger lever is keeping the model **resident**. Cold, the 30B costs ~33 s
+to page in; warm, the same request takes 0.3 s. Ladder sends `keep_alive`
+(30 minutes by default, `LADDER_KEEP_ALIVE` to change).
+
+Sustained runs throttle: 11.5 tok/s cool falls to ~3 tok/s after minutes of
+continuous inference on a 15 W part. Run `python scripts/bench.py` for your own
+numbers.
 
 **Every `claude -p` call costs ~35k tokens before it does any work.** That is
 the Claude Code harness — system prompt plus tool definitions — reloaded on each

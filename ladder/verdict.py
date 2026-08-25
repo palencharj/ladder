@@ -120,12 +120,19 @@ def assess(report: dict, using_cli_fallback: bool = True) -> dict:
             "painful if anyone is waiting."
         )
         actions.append(
-            "For short-output work pass model='qwen2.5-coder:3b' -- measured "
-            "1.7s vs 33.8s for the 30B on the same classification."
+            "Check the model is staying resident. A cold 18GB model costs ~33s "
+            "to load against 0.3s warm, so intermittent use pays that reload "
+            "repeatedly. Raise LADDER_KEEP_ALIVE (default 30m), and confirm "
+            "with `ollama ps` that it is still held."
         )
         actions.append(
-            "Lower max_tokens on rung-0 jobs. Local deadline and wall clock "
-            "both scale directly with it."
+            "Lower max_tokens on rung-0 jobs. Local wall clock scales directly "
+            "with it, and sustained runs throttle toward ~3 tok/s."
+        )
+        actions.append(
+            "Only swap to a smaller local model if RAM is contended or the "
+            "model is often cold -- warm, a 3B and a 30B MoE are within 7% of "
+            "each other, so this is not the throughput lever it appears to be."
         )
         verdict = "marginal"
         headline = (

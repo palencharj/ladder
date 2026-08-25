@@ -84,22 +84,43 @@ Nothing in dollars. The cost is wall-clock, and it is hardware-dependent.
 Measured on an Intel Core Ultra 7 265U (12C/14T, 15W class, **no discrete
 GPU**), 64 GB DDR5-5600 (~90 GB/s theoretical), Ollama 0.32.14, CPU-only:
 
-| Model | Size | Generation | Prefill |
-|---|---|---|---|
-| `qwen3-coder:30b` (MoE) | 18 GB | 3.2–5.4 tok/s | 15.7–20.5 tok/s |
-| `qwen2.5-coder:7b` (dense) | 4.7 GB | 3.2 tok/s | 11.0 tok/s |
+| Model | Size | Active params | Generation | Prefill |
+|---|---|---|---|---|
+| `qwen2.5-coder:3b` (dense) | 1.9 GB | ~3B | 13.3 tok/s | 60.8 tok/s |
+| `qwen2.5-coder:7b` (dense) | 4.7 GB | ~7B | 6.6 tok/s | 20.4 tok/s |
+| `qwen3-coder:30b` (MoE) | 18 GB | ~3B | 11.5 tok/s | 31.9 tok/s |
+
+On short outputs with the model already resident, both the 3B and the 30B
+answer a two-token classification in **0.3 s**, at 37.8 and 35.4 tok/s
+respectively.
+
+> **These figures replace earlier ones.** An initial round of measurement
+> reported 3.2–5.4 tok/s and claimed the 7B was no faster than the 30B. Both
+> were artefacts: the runs were taken during sustained load with the machine
+> already throttling, and a separate "3B is 20× faster" claim turned out to be
+> measuring model *load* time, not generation. The corrected numbers are above.
 
 Three findings that should change how you use rung 0:
 
-**Parameter count is not the bottleneck.** A 7B dense model generated no faster
-than a 30B mixture-of-experts. Generation is bound by memory bandwidth, and on
-a 15W part, by thermal headroom. Since the larger model is the same speed and
-substantially smarter, it is the default.
+**Speed tracks _active_ parameters, which is the signature of a bandwidth
+limit.** The 7B is roughly half the 3B, matching its parameter ratio. The 30B
+mixture-of-experts is nearly as fast as the 3B despite being ten times the size
+on disk, because it activates only ~3B parameters per token. Generation is
+bound by how many bytes must cross the memory bus, not by arithmetic. This is
+also why an NPU does not help: it shares the very same system RAM.
 
-**Throughput degrades under sustained load.** The 30B measured 5.4 tok/s cold
-and 3.2 tok/s after several minutes of continuous inference — consistent with
-clock throttling on a low-wattage laptop chip. Long swarm runs get slower, not
-faster.
+**Residency dominates perceived speed, not tokens per second.** A cold 30B
+costs ~33 s to page 18 GB in from disk; warm, the same request takes 0.3 s. A
+hundredfold difference that has nothing to do with generation rate. Ladder
+therefore sends `keep_alive` (default 30 minutes, `LADDER_KEEP_ALIVE` to
+change) — Ollama's own 5-minute default is too short for bursty use, where
+stepping away for a coffee means the next job pays the full reload.
+
+**Throughput still degrades under sustained load.** The 30B measured 11.5 tok/s
+on a cool machine and ~3.2 tok/s after minutes of continuous inference —
+roughly a 3.5× fall, consistent with clock throttling on a 15 W part. Long
+swarm runs get slower as they go, so a batch timed from its first few jobs will
+finish later than you predict.
 
 **Local concurrency does not increase generation throughput.** Measured on the
 same machine:
@@ -129,9 +150,13 @@ become fast enough for interactive use. Measure before assuming.
 
 ### Practical reading
 
-At ~4 tok/s, a 200-token docstring takes about a minute. That is unusable in a
-loop a human is watching, and perfectly fine for fifty docstrings generated
-while you do something else. Use rung 0 for work you can walk away from.
+With the model resident, a short answer comes back in well under a second, and
+a 200-token docstring takes roughly twenty seconds at 11 tok/s. That is usable
+interactively for small outputs, and still batch-shaped for anything long —
+especially since sustained runs throttle toward ~3 tok/s.
+
+The thing to avoid is a *cold* model: the first request after an idle period
+pays the full reload, which is why `keep_alive` defaults to 30 minutes.
 
 ### Timeouts at rung 0
 
@@ -182,14 +207,23 @@ Rung 0's default is the 30B, because for code generation it is no slower than a
 7B and considerably smarter. For **short-output** work that calculus inverts
 completely -- generation time dominates, and a 3B finishes far sooner.
 
-Measured, same prompt, same correct answer (`BUG`), both free:
+An earlier version of this section claimed a 20× speedup for the 3B, from
+1.7 s against 33.8 s on one classification. That was wrong: the 33.8 s was
+almost entirely the cost of paging an 18 GB model in from disk. With both
+models resident the same request takes 0.3 s on either, and generation runs at
+37.8 tok/s on the 3B against 35.4 on the 30B — within 7%.
 
-| Model | Wall clock |
-|---|---|
-| `qwen2.5-coder:3b` | **1.7 s** |
-| `qwen3-coder:30b` (default) | 33.8 s |
+| Model | Warm, 2-token answer | Generation | Disk | RAM held |
+|---|---|---|---|---|
+| `qwen2.5-coder:3b` | 0.3 s | 37.8 tok/s | 1.9 GB | 2.2 GB |
+| `qwen3-coder:30b` | 0.3 s | 35.4 tok/s | 18 GB | 19 GB |
 
-A 20x speedup for a one-word classification. Pass `model` to use it:
+So the 3B's real advantages are **load time and memory footprint**, not
+throughput. Prefer it when RAM is contended, when the model will often be cold,
+or on a machine that cannot hold 19 GB resident. Otherwise the 30B is the
+better default: same speed once warm, considerably more capable.
+
+Pass `model` to switch per job:
 
 ```
 ladder_run(prompt="...", kind="classify", model="qwen2.5-coder:3b", max_rung=0)
