@@ -103,12 +103,14 @@ class Swarm:
         """Tasks may share an invocation only if they share every setting.
 
         Batching concatenates prompts under one system prompt and one output
-        budget, so anything that changes those has to split the batch. It also
-        excludes adjudication and escalation, which are per-job decisions a
-        batch cannot make as a unit.
+        budget, so anything that changes those has to split the batch.
+        `adjudicate` is included because a batch is checked as a unit: mixing
+        checked and unchecked tasks in one call would check the wrong things.
+        Escalation headroom is handled separately -- a batch answers at exactly
+        one rung, so a task allowed to climb cannot join one.
         """
         return (task.kind, task.system_extra, task.verify, task.max_tokens,
-                task.model, task.rung, task.tier_name)
+                task.model, task.rung, task.tier_name, task.adjudicate)
 
     def _try_batch(self, group: list[Task], swarm_id: str) -> tuple[list[dict], list[Task]]:
         """Batch what can be batched. Returns (results, tasks needing individual runs)."""
@@ -119,21 +121,23 @@ class Swarm:
 
         buckets: dict[tuple, list[Task]] = {}
         for t in group:
-            # A task allowed to escalate, or wanting adjudication, must run on
-            # its own -- a batch answers at exactly one rung.
-            if t.adjudicate or (t.max_rung is not None
-                                and t.max_rung > t.start_rung()):
+            # A task allowed to climb must run alone: a batch answers at exactly
+            # one rung. Adjudication is fine batched -- the whole chunk is
+            # checked in a single call at the rung above.
+            if t.max_rung is not None and t.max_rung > t.start_rung():
                 leftover.append(t)
                 continue
             buckets.setdefault(self._batch_key(t), []).append(t)
 
         for bucket in buckets.values():
+            wants_adjudication = bucket[0].adjudicate
             for i in range(0, len(bucket), MAX_BATCH):
                 chunk = bucket[i:i + MAX_BATCH]
                 if len(chunk) < 2:
                     leftover.extend(chunk)
                     continue
-                out = self.router.run_batch(chunk, swarm_id)
+                out = self.router.run_batch(chunk, swarm_id,
+                                            adjudicate=wants_adjudication)
                 if out is None:
                     leftover.extend(chunk)   # fall back, never misalign
                 else:

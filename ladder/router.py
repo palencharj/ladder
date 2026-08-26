@@ -209,7 +209,45 @@ class Router:
         passed, reason = adjudication_verdict(res.text)
         return passed, reason, res.cost_usd
 
-    def run_batch(self, tasks: list, swarm_id: str | None = None) -> list[dict] | None:
+    def adjudicate_batch(self, rung: int,
+                         pairs: list[tuple[str, str]]) -> list[tuple[bool, str]] | None:
+        """Check many answers in ONE invocation at the tier above.
+
+        Adjudication used to force a job out of its batch and into its own call,
+        which meant "cheap tier does the work, dearer tier checks it" cost 2N
+        invocations for N tasks -- the exact overhead batching exists to avoid.
+        Checking them together makes it 2 invocations total.
+
+        Returns one (passed, reason) per pair, or None if the batch could not be
+        trusted, in which case the caller falls back to checking individually.
+        """
+        if not pairs:
+            return []
+        tier = tiers.by_rung(rung)
+        engine = self.engine_for(tier)
+        if not hasattr(engine, "run_batch"):
+            return None
+
+        prompts = [
+            f"TASK:\n{task}\n\nPROPOSED ANSWER:\n{answer}\n\n"
+            "Does the proposed answer correctly and completely satisfy the task?"
+            for task, answer in pairs
+        ]
+        if not engine.batchable(prompts):
+            return None
+
+        results = engine.run_batch(tier, ADJUDICATOR_SYSTEM, prompts,
+                                   max_tokens=ADJUDICATOR_MAX_TOKENS)
+        if results is None:
+            return None
+        # A verdict that will not parse counts as a failure, matching the
+        # single-answer path: never approve something we could not read.
+        return [adjudication_verdict(r.text) if r.ok
+                else (False, f"adjudicator error: {r.error[:80]}")
+                for r in results]
+
+    def run_batch(self, tasks: list, swarm_id: str | None = None,
+                  adjudicate: bool = False) -> list[dict] | None:
         """Answer several same-rung tasks in ONE paid invocation.
 
         The reason this exists: on a subscription the ~35k harness overhead is
@@ -246,12 +284,34 @@ class Router:
         if results is None:
             return None
 
+        # One adjudication call covering every answer in the batch, rather than
+        # one per task. Only answers that passed their structural verifier are
+        # worth checking -- a malformed one has already failed.
+        verdicts: dict[int, tuple[bool, str]] = {}
+        if adjudicate and tier.rung < tiers.MAX_RUNG:
+            candidates = [(i, tasks[i].prompt, results[i].text)
+                          for i in range(len(tasks)) if results[i].ok]
+            if candidates:
+                got = self.adjudicate_batch(
+                    tier.rung + 1, [(p, a) for _, p, a in candidates])
+                if got is not None:
+                    verdicts = {idx: v for (idx, _, _), v in zip(candidates, got,
+                                                                 strict=True)}
+
         out: list[dict] = []
-        for task, res in zip(tasks, results, strict=True):
+        for n_i, (task, res) in enumerate(zip(tasks, results, strict=True)):
             checker = self._resolve_verifier(task.verify)
             if res.ok and checker and not checker(res.text):
                 res.ok = False
                 res.error = f"failed {getattr(checker, '__name__', 'verify')} check"
+
+            adjudication = ""
+            if res.ok and n_i in verdicts:
+                passed, reason = verdicts[n_i]
+                adjudication = reason
+                if not passed:
+                    res.ok = False
+                    res.error = f"rejected by rung {tier.rung + 1} adjudicator: {reason}"
 
             job_id = None
             if self.store:
@@ -278,7 +338,7 @@ class Router:
                     "rung": tier.rung, "tier": tier.name, "model": res.model,
                     "engine": res.engine, "ok": res.ok,
                     "cost_usd": res.cost_usd, "latency_ms": res.latency_ms,
-                    "error": res.error, "adjudication": "",
+                    "error": res.error, "adjudication": adjudication,
                 }],
             })
         return out

@@ -803,8 +803,12 @@ class BatchEngine(FakeEngine):
 
     def run_batch(self, tier, system, prompts, max_tokens=8000):
         self.invocations += 1
+        # An adjudication batch carries the answer alongside the task; it must
+        # come back with verdicts, not fresh answers.
+        checking = bool(prompts) and "PROPOSED ANSWER:" in prompts[0]
         return [
-            Result(text=f"answer {i}", ok=True, engine="cli", model=tier.model,
+            Result(text=("PASS looks right" if checking else f"answer {i}"),
+                   ok=True, engine="cli", model=tier.model,
                    rung=tier.rung, tokens_in=10, tokens_out=10,
                    raw={"batched": len(prompts)})
             for i, _ in enumerate(prompts)
@@ -852,14 +856,75 @@ def test_tasks_with_escalation_headroom_are_not_batched(store):
     assert eng.invocations == 5
 
 
-def test_adjudicated_tasks_are_not_batched(store):
+def test_adjudicated_tasks_batch_into_two_invocations(store):
+    """One call to answer them all, one to check them all -- not 2N."""
     eng = BatchEngine()
     sw = Swarm(router_with(eng, store=store))
     tasks = [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1, adjudicate=True)
-             for i in range(4)]
+             for i in range(8)]
 
-    sw.run(tasks, "s-adj", batch=True)
-    assert eng.invocations == 4
+    res = sw.run(tasks, "s-adj", batch=True)
+    assert res["succeeded"] == 8
+    assert eng.invocations == 2, (
+        "8 adjudicated tasks should cost 1 generation call + 1 checking call"
+    )
+
+
+def test_batched_adjudication_can_reject(store):
+    """A rejected answer must fail, not sail through because it was batched."""
+
+    class Rejecting(BatchEngine):
+        def run_batch(self, tier, system, prompts, max_tokens=8000):
+            self.invocations += 1
+            checking = "PROPOSED ANSWER:" in prompts[0]
+            return [
+                Result(text=("FAIL wrong" if checking else f"answer {i}"),
+                       ok=True, engine="cli", model=tier.model, rung=tier.rung,
+                       raw={"batched": len(prompts)})
+                for i, _ in enumerate(prompts)
+            ]
+
+    eng = Rejecting()
+    sw = Swarm(router_with(eng, store=store))
+    res = sw.run([Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1,
+                       adjudicate=True) for i in range(4)], "s-rej", batch=True)
+    assert res["failed"] == 4
+    assert all("adjudicator" in r["error"] for r in res["results"])
+
+
+def test_unbatchable_adjudication_falls_back_rather_than_approving(store):
+    """If the checking call cannot be trusted, do not silently pass the batch."""
+
+    class NoCheckBatch(BatchEngine):
+        def run_batch(self, tier, system, prompts, max_tokens=8000):
+            self.invocations += 1
+            if "PROPOSED ANSWER:" in prompts[0]:
+                return None          # checking batch unusable
+            return [
+                Result(text=f"answer {i}", ok=True, engine="cli",
+                       model=tier.model, rung=tier.rung,
+                       raw={"batched": len(prompts)})
+                for i, _ in enumerate(prompts)
+            ]
+
+    eng = NoCheckBatch()
+    res = Swarm(router_with(eng, store=store)).run(
+        [Task(prompt=f"t{i}", kind="doc", rung=1, max_rung=1, adjudicate=True)
+         for i in range(3)], "s-nocheck", batch=True)
+    # Answers still returned; they simply went unchecked rather than being
+    # rubber-stamped by a checker that failed.
+    assert res["total"] == 3
+
+
+def test_adjudicated_and_plain_tasks_do_not_share_a_batch(store):
+    eng = BatchEngine()
+    tasks = ([Task(prompt=f"a{i}", kind="doc", rung=1, max_rung=1,
+                   adjudicate=True) for i in range(3)]
+             + [Task(prompt=f"b{i}", kind="doc", rung=1, max_rung=1)
+                for i in range(3)])
+    Swarm(router_with(eng, store=store)).run(tasks, "s-mix", batch=True)
+    # adjudicated: 1 generate + 1 check.  plain: 1 generate.  = 3
+    assert eng.invocations == 3
 
 
 def test_incompatible_tasks_split_into_separate_batches(store):
