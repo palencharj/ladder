@@ -286,7 +286,9 @@ not a bug. Use rung 0 for batch work, not for anything interactive.
 
 ## Documentation
 
+- [`ROUTING.md`](ROUTING.md) — make Ladder the default path, and what not to route
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit, and why
+- [`docs/npu.md`](docs/npu.md) — why the Intel NPU is measured, and not used
 - [`docs/cost-model.md`](docs/cost-model.md) — measured costs, the CLI overhead trap, tuning
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — full tool and parameter reference
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — adding a rung, an engine, or a task kind
