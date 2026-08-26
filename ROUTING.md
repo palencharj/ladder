@@ -84,6 +84,19 @@ Overrides worth knowing:
 - `max_tokens` — raise it for long outputs. A truncated answer is retried with
   more budget at the same rung, but starting closer saves a round trip.
 
+### Before a large batch
+
+Warm the local model first. A cold 18 GB model costs ~33 s to page in against
+0.3 s warm, and without this the first job of a batch pays that:
+
+```
+ladder_models(action="warm")
+```
+
+`ladder_models(action="status")` shows what is resident and whether the rung-0
+model fits in available RAM. `action="unload_others"` frees everything else —
+an idle model holds its full weight in RAM for nothing.
+
 ### After a batch
 
 Call `ladder_report` occasionally. Two numbers matter:

@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ladder import models as _models  # noqa: E402
 from ladder import tiers  # noqa: E402
 from ladder import verdict as _verdict  # noqa: E402
 from ladder.pool import Swarm, Task, TierGate  # noqa: E402
@@ -202,6 +203,26 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "days": {"type": "integer", "description": "Only consider jobs from the last N days. Omit for all time."},
+            },
+        },
+    },
+    {
+        "name": "ladder_models",
+        "description": (
+            "Manage the local models rung 0 runs on. Ladder is usually the only "
+            "thing using local models, so it manages them rather than leaving "
+            "you to remember ollama commands. Residency is the point: a cold "
+            "18GB model costs ~33s to load against 0.3s warm, so warm it BEFORE "
+            "a batch rather than letting the first job pay. Only one model "
+            "should normally be resident -- idle ones hold their full weight in "
+            "RAM for nothing. Actions: status (default), warm, unload, "
+            "unload_others, ensure."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["status", "warm", "unload", "unload_others", "ensure"], "description": "status: what is installed, resident, and how much RAM is free. warm: load a model now. unload: free one. unload_others: free everything except `model`. ensure: present on disk AND resident."},
+                "model": {"type": "string", "description": "Which model. Defaults to the current rung-0 model."},
             },
         },
     },
@@ -518,7 +539,51 @@ def validate_args(tool: dict, args: dict) -> str | None:
     return None
 
 
+def t_models(args: dict) -> dict:
+    action = args.get("action", "status")
+    model = args.get("model") or tiers.by_rung(0).model
+
+    if action == "status":
+        st = _models.status()
+        lines = [f"rung-0 model: {model}"]
+        avail = st["available_ram_gb"]
+        lines.append(
+            f"RAM available: {avail:.1f} GB" if avail else "RAM available: unknown")
+        lines.append(f"resident: {st['resident_gb']:.1f} GB across "
+                     f"{len(st['resident'])} model(s)")
+        if st["resident"]:
+            lines.append("")
+            for m in st["resident"]:
+                lines.append(f"  LOADED  {m['name']:<24} {m['size_gb']:>5.1f} GB")
+        lines.append("")
+        for m in st["installed"]:
+            held = any(r["name"] == m["name"] for r in st["resident"])
+            lines.append(f"  {'on disk' if not held else 'loaded ':<8}"
+                         f"{m['name']:<24} {m['size_gb']:>5.1f} GB")
+        _, why = _models.fits(model)
+        lines += ["", f"fit check: {why}"]
+        return {"text": "\n".join(lines)}
+
+    if action == "warm":
+        ok, msg = _models.warm(model)
+    elif action == "unload":
+        ok, msg = _models.unload(model)
+    elif action == "ensure":
+        ok, msg = _models.ensure(model)
+    elif action == "unload_others":
+        freed = _models.unload_all_except(model)
+        ok, msg = True, (f"freed {', '.join(freed)}" if freed
+                         else f"nothing else was resident besides {model}")
+    else:
+        return {"text": f"unknown action {action!r}"}
+
+    avail = _models.available_ram_gb()
+    tail = f"  |  {avail:.1f} GB RAM available" if avail else ""
+    return {"text": f"{'ok' if ok else 'FAILED'}: {msg}{tail}"}
+
+
 HANDLERS = {
+    "ladder_models": t_models,
     "ladder_report": t_report,
     "ladder_health": t_health,
     "ladder_tiers": t_tiers,

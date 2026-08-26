@@ -19,7 +19,7 @@ SERVER = ROOT / "mcp" / "ladder_mcp.py"
 
 EXPECTED_TOOLS = {
     "ladder_health", "ladder_tiers", "ladder_run",
-    "ladder_swarm", "ladder_review", "ladder_status", "ladder_stats", "ladder_report",
+    "ladder_swarm", "ladder_review", "ladder_status", "ladder_stats", "ladder_report", "ladder_models",
 }
 
 REQUESTS = [

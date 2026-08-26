@@ -1176,3 +1176,88 @@ def test_port_probe_is_false_for_a_free_port():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     assert not port_is_taken("127.0.0.1", port)
+
+
+# --------------------------------------------------------------------------
+# Local model lifecycle
+#
+# Residency is the dominant latency factor at rung 0: a cold 18GB model costs
+# ~33s to page in against 0.3s warm. Ladder manages this rather than leaving
+# the user to remember ollama commands.
+# --------------------------------------------------------------------------
+
+def test_fits_refuses_a_model_that_would_not_leave_headroom(monkeypatch):
+    from ladder import models
+
+    monkeypatch.setattr(models, "installed", lambda host=None: [
+        {"name": "huge:70b", "size_gb": 40.0}])
+    monkeypatch.setattr(models, "resident", lambda host=None: [])
+    monkeypatch.setattr(models, "available_ram_gb", lambda: 20.0)
+
+    ok, why = models.fits("huge:70b")
+    assert not ok
+    assert "unusable, not merely slow" in why, "must explain why it is refused"
+
+
+def test_fits_accepts_a_model_with_room_to_spare(monkeypatch):
+    from ladder import models
+
+    monkeypatch.setattr(models, "installed", lambda host=None: [
+        {"name": "ok:30b", "size_gb": 18.0}])
+    monkeypatch.setattr(models, "resident", lambda host=None: [])
+    monkeypatch.setattr(models, "available_ram_gb", lambda: 40.0)
+    assert models.fits("ok:30b")[0]
+
+
+def test_an_already_resident_model_always_fits(monkeypatch):
+    """It is in RAM already; refusing it would be nonsense."""
+    from ladder import models
+
+    monkeypatch.setattr(models, "installed", lambda host=None: [
+        {"name": "big:30b", "size_gb": 18.0}])
+    monkeypatch.setattr(models, "resident", lambda host=None: [
+        {"name": "big:30b", "size_gb": 18.0, "until": ""}])
+    monkeypatch.setattr(models, "available_ram_gb", lambda: 2.0)
+    assert models.fits("big:30b")[0]
+
+
+def test_fits_reports_a_model_that_is_not_installed(monkeypatch):
+    from ladder import models
+
+    monkeypatch.setattr(models, "installed", lambda host=None: [])
+    monkeypatch.setattr(models, "resident", lambda host=None: [])
+    ok, why = models.fits("nope:1b")
+    assert not ok and "not installed" in why
+
+
+def test_ensure_does_not_silently_pull_a_large_model(monkeypatch):
+    """A multi-gigabyte download should be a deliberate act, not a side effect."""
+    from ladder import models
+
+    monkeypatch.setattr(models, "installed", lambda host=None: [])
+    monkeypatch.setattr(models, "resident", lambda host=None: [])
+    ok, why = models.ensure("missing:30b")
+    assert not ok and "ollama pull" in why
+
+
+def test_unload_all_except_keeps_the_named_model(monkeypatch):
+    from ladder import models
+
+    monkeypatch.setattr(models, "resident", lambda host=None: [
+        {"name": "keep:3b", "size_gb": 2.0, "until": ""},
+        {"name": "drop:7b", "size_gb": 4.7, "until": ""},
+        {"name": "drop:30b", "size_gb": 18.0, "until": ""}])
+    dropped = []
+    monkeypatch.setattr(models, "unload",
+                        lambda m, host=None: (dropped.append(m), (True, ""))[1])
+
+    freed = models.unload_all_except("keep:3b")
+    assert sorted(freed) == ["drop:30b", "drop:7b"]
+    assert "keep:3b" not in dropped
+
+
+def test_available_ram_is_a_positive_number_or_none():
+    from ladder import models
+
+    ram = models.available_ram_gb()
+    assert ram is None or ram > 0

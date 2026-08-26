@@ -167,6 +167,7 @@ costs a cent.
 | `ladder_review` | Code review over a set of files, one job per file |
 | `ladder_status` | Job or swarm state, with the full escalation trail |
 | `ladder_stats` | Spend and per-tier breakdown |
+| `ladder_models` | Manage local models: what is installed, resident, and whether it fits in RAM. Warm before a batch. |
 | `ladder_report` | **Is this tool worth running?** A verdict, the numbers behind it, and ranked actions — per user and per task kind |
 
 Full parameter reference: [`docs/mcp-tools.md`](docs/mcp-tools.md).
