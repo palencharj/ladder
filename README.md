@@ -224,6 +224,22 @@ follow, and they are the whole point of this tool:
 
 `ladder_health` tells you which path is live at any moment.
 
+## Making it the default
+
+Ladder is most useful when nobody has to remember it exists. Add one line to
+your `~/.claude/CLAUDE.md`:
+
+```
+@C:/path/to/ladder/ROUTING.md
+```
+
+That imports a routing policy telling Claude Code to send mechanical, repetitive,
+latency-tolerant work through the `ladder_*` tools automatically — and, just as
+importantly, to keep precision and interactive work in the main session where it
+belongs. See [`ROUTING.md`](ROUTING.md) for the policy and the reasoning.
+
+Update the policy in one place and everyone who imported it picks up the change.
+
 ## Troubleshooting
 
 **"Server 'ladder' is defined in multiple scopes."** Expected if you both
