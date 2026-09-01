@@ -27,6 +27,18 @@ not depend on a local path.
 
 <!-- everything below this line is the instruction Claude reads -->
 
+### Default to Ladder, local rung first (per John, 2026-09-01)
+
+Goal: convenience + lower token spend. Whenever a task fits the "send to
+Ladder" profile below, route it there by default, starting at the local/free
+rung (`max_rung: 0`), without waiting to be asked.
+
+This does not override the "keep it in the main session" list below —
+precision-critical, sequential, or interactive work still stays in-session,
+because a wrong local-model result there costs more tokens to verify and redo
+than it saves. The point is to stop *hesitating* on the clear cases, not to
+force every case through Ladder.
+
 ### Routing work to Ladder
 
 The `ladder_*` MCP tools run tasks on the cheapest model that can do them,
