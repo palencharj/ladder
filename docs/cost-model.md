@@ -273,6 +273,38 @@ Per-user rows let a team see who is using it and what each person's mix of free
 and paid work looks like. Identity comes from `LADDER_USER`, falling back to the
 OS username.
 
+### Reasoning models are wrong for rung 0
+
+A candidate can match the incumbent's architecture exactly and still lose badly.
+Measured against `qwen3-coder:30b` on six tasks drawn from real usage:
+
+| model | correct | total | tok/s |
+|---|---|---|---|
+| `qwen3-coder:30b` | **6/6** | **23.7 s** | 10.7 |
+| `nemotron-3.5-lightning:30b-a3b` | 3/6 | 333.5 s | 6.5 |
+
+Same 30B total, same 3B active, and per-token speed did land in the same
+ballpark — the active-parameter rule held. It lost **14x on wall clock** anyway,
+because it is a reasoning model: it emits 10-50x more tokens to answer the same
+question. Given a generous 2,500-token budget it spent **9,705 characters of
+`thinking` on a `slugify` function** and still ran out before writing any code.
+
+Per-token speed stops mattering when the token count explodes. Rung 0 exists for
+cheap mechanical work; paying thousands of thinking tokens for boilerplate is
+the wrong trade at any speed.
+
+Spotting one before wasting a 25 GB download: the model card mentions reasoning
+or thinking modes, a response carries a `thinking` field beside `content`, or a
+short prompt returns `done_reason: "length"` with `content` empty. If you do
+benchmark one, give it thousands of tokens — a small cap measures your budget
+rather than the model, which is exactly how the first run here produced two
+misleading empty answers.
+
+Ladder itself handles the truncation correctly: `length` is a truncation stop
+reason, so the job retries at the same rung with double the budget rather than
+escalating to a paid tier. That mechanism works, but it cannot rescue a model
+that needs 10k characters of thought per task.
+
 ## Tuning the policy
 
 The whole cost policy is `TASK_RUNGS` in `ladder/tiers.py`:

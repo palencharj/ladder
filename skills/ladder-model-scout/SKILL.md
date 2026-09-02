@@ -35,6 +35,24 @@ Leave ~8 GB of headroom for the OS and the user's actual work.
 was *residency*: ~33 s cold against 0.3 s warm. Check `LADDER_KEEP_ALIVE`
 before concluding a model is slow.
 
+**Reject reasoning models for rung 0, whatever their architecture says.** This
+is the trap that active-parameter filtering does not catch. Tested here:
+`nemotron-3.5-lightning:30b-a3b` matches the incumbent exactly on paper — 30B
+total, 3B active, and per-token speed duly landed close (6.5 vs 10.7 tok/s).
+It still lost 14x on wall clock, because it emits 10-50x more tokens to answer
+the same question. It spent 9,705 characters of `thinking` on a slugify
+function and ran out of budget before writing any code.
+
+Per-token speed stops mattering when the token count explodes. Rung 0 is for
+cheap mechanical work, and paying thousands of thinking tokens for boilerplate
+is the wrong trade at any speed.
+
+How to spot one: the model card mentions reasoning or thinking modes; a response
+carries a `thinking` field beside `content`; or a short prompt returns
+`done_reason: "length"` with `content` empty. Check for this **before** running
+a full A/B — and if you do test one, give it a budget in the thousands, or the
+comparison measures your token cap rather than the model.
+
 ## Method
 
 ### 1. What does the machine actually have?
