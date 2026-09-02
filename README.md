@@ -241,6 +241,55 @@ belongs. See [`ROUTING.md`](ROUTING.md) for the policy and the reasoning.
 
 Update the policy in one place and everyone who imported it picks up the change.
 
+## Two deeper integrations
+
+The `@import` in `CLAUDE.md` is loaded once per session and then competes with
+everything else in context. Two optional pieces push harder.
+
+### A routing hook that runs on every prompt
+
+`scripts/route_hint.py` is a `UserPromptSubmit` hook. It sees each prompt, and
+injects guidance **only when the prompt is actually routable** — so the reminder
+arrives at the moment of the decision rather than scrolling away hours earlier.
+
+```json
+"UserPromptSubmit": [
+  { "hooks": [ { "type": "command",
+    "command": "python \"/path/to/ladder/scripts/route_hint.py\"", "timeout": 10 } ] }
+]
+```
+
+It stays silent on ordinary prompts, and deliberately stays silent on precision
+work even when that work *also* looks bulk — "debug why every test fails" is
+still debugging, and fanning it out produces confident shallow findings.
+
+It also catches the expensive silent failure: **if Ollama is down, it says so**.
+Otherwise every job falls through to a paid rung and nothing in the UI tells you.
+
+A hook cannot force a tool call — nothing can. It makes the cheapest correct
+option impossible to overlook.
+
+### A skill that finds a better local model
+
+`skills/ladder-model-scout/` — copy it to `~/.claude/skills/` and ask *"is there
+a better local model for me?"*
+
+It checks real available RAM, reads your own deflection data to learn what you
+actually run, searches the current Ollama library, and **A/B tests candidates
+against your incumbent before recommending anything**. It is built to conclude
+"keep what you have," which is the usual right answer.
+
+Three rules encoded in it, each learned by getting it wrong first:
+
+- **Speed tracks _active_ parameters, not total size.** Measured here: 3B dense
+  13.3 tok/s, 7B dense 6.6, 30B MoE **11.5** — the MoE nearly matches the 3B
+  because it activates ~3B parameters. A large MoE is the sweet spot.
+- **A model that does not fit in RAM is unusable, not slow.** Paging weights
+  from NVMe is orders of magnitude off RAM speed, and worse for MoE.
+- **Switching models is rarely the speed lever people expect.** Warm, a 3B and a
+  30B MoE were within 7%. The 100x difference was residency — 33s cold against
+  0.3s warm. Check `LADDER_KEEP_ALIVE` before blaming the model.
+
 ## Troubleshooting
 
 **"Server 'ladder' is defined in multiple scopes."** Expected if you both
@@ -290,6 +339,7 @@ not a bug. Use rung 0 for batch work, not for anything interactive.
 - [`ROUTING.md`](ROUTING.md) — make Ladder the default path, and what not to route
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit, and why
 - [`docs/npu.md`](docs/npu.md) — why the Intel NPU is measured, and not used
+- [`skills/ladder-model-scout/`](skills/ladder-model-scout/SKILL.md) — a skill that finds a better local model for your machine
 - [`docs/cost-model.md`](docs/cost-model.md) — measured costs, the CLI overhead trap, tuning
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — full tool and parameter reference
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — adding a rung, an engine, or a task kind
