@@ -99,9 +99,31 @@ ladder_recall(question="why was nemotron rejected for rung 0")
 | Parameter | Type | Meaning |
 |---|---|---|
 | `question` | string | A natural question beats keywords; retrieval is hybrid semantic + lexical |
-| `k` | integer | Candidate notes considered before filtering. Default 8 |
+| `k` | integer | Candidate notes considered before filtering. Default 4 — raising it is usually worse, see below |
 | `max_chars` | integer | Hard cap on returned text. Default 4000 — the bounded context cost is the point |
 | `model` | string | Local model override for the selection step |
+
+### More candidates is worse, not better
+
+The obvious instinct is that a larger candidate set can only help: more notes
+means a better chance the right one is in there. Measured, it is the opposite.
+
+Three trials each, on a question whose answer lives in one specific note:
+
+| k | verified excerpts | **on-target excerpts** | seconds |
+|---|---|---|---|
+| **4** | 3.0 | **3.0** | 100 |
+| 8 | 5.0 | **0.0** | 216 |
+
+At k=8 the model never once quoted the note that answered the question — zero
+useful excerpts out of fifteen — while returning *more* verified quotes than
+k=4 and taking twice as long. The right note was in the candidate set every
+time; it ranked first in the search. The bodies all share one prompt, and a
+model activating ~3B parameters loses the thread over a long one.
+
+Keep this straight, because it is the tool's sharpest edge: **verification
+proves a quote is real, never that it is relevant.** By the verification metric
+k=8 was the healthier-looking setting. It was the useless one.
 
 ### Pointing it at your vault
 

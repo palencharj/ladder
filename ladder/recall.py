@@ -117,7 +117,26 @@ NOT_CONFIGURED = (
 )
 
 # How many notes the search engine offers before the model filters them.
-DEFAULT_CANDIDATES = 8
+#
+# Lowered from 8 after measuring it. More candidates sounds strictly better --
+# a larger set is likelier to contain the right note -- but the note bodies all
+# go in one prompt, and a model activating ~3B parameters loses the thread over
+# a long one. Three trials each, asking a question whose answer sits in one
+# specific note:
+#
+#     k   verified   on-target   secs
+#     4      3.0        3.0       100
+#     8      5.0        0.0       216
+#
+# At k=8 it never once quoted the note that answered the question, across 15
+# excerpts in 3 trials, while returning MORE verified quotes than k=4 and
+# taking twice as long. The target note was in the candidate set every time --
+# it ranked first in the search. The model simply had too much to hold.
+#
+# That gap is the thing to remember about this tool: verification proves a
+# quote is real, never that it is relevant. By the verification metric k=8
+# looked the healthier setting while being useless.
+DEFAULT_CANDIDATES = 4
 # Ceiling on what comes back. The entire point is a bounded context cost, so
 # this is a hard cap rather than a suggestion.
 DEFAULT_MAX_CHARS = 4_000
