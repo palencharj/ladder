@@ -399,13 +399,34 @@ def test_repair_hands_the_target_the_draft_and_the_objection():
     assert "WHY IT WAS REJECTED:" in seen[0]
 
 
-def test_local_share_counts_only_accepted_draft_tokens():
-    """A rejected draft was regenerated at the paid tier. Counting its tokens
-    as local generation would flatter the number with discarded work."""
+def test_local_share_measures_delivered_text_on_one_yardstick():
+    """The first version compared Ollama's eval_count against the CLI's
+    output_tokens, which count different things -- the CLI reported 1,486
+    output tokens for a 1,047-character answer. Characters of delivered text
+    are the only measure both engines report identically."""
     s = Speculation()
-    s.local_tokens, s.paid_tokens = 900, 100
+    s.local_chars, s.paid_chars = 900, 100
     assert s.local_share == 0.9
     assert Speculation().local_share == 0.0
+
+
+def test_engine_token_counts_do_not_drive_local_share():
+    """Raw token fields stay for the allowance figure, but must not leak into
+    the authorship ratio -- mixing the two is what made it meaningless."""
+    s = Speculation()
+    s.local_tokens, s.paid_tokens = 900, 100_000
+    assert s.local_share == 0.0, "no delivered text yet, so no authorship"
+    s.local_chars = 50
+    assert s.local_share == 1.0, "token counts must not move this"
+
+
+def test_verification_output_is_not_counted_as_authorship():
+    """Nobody receives a verdict. Counting it as paid authorship made a run
+    where every draft was accepted look like the paid tier wrote most of it."""
+    out = spec_with(SpecEngine()).run(tasks(4), chunk=4)
+    assert out["spec"]["accepted"] == 4
+    assert out["spec"]["paid_chars"] == 0
+    assert out["spec"]["local_share"] == 1.0
 
 
 def test_mixed_kind_repair_uses_one_system_prompt():
@@ -529,3 +550,36 @@ def test_mechanical_kinds_actually_land_on_the_free_tier():
     for p in ("Add docstrings everywhere", "Classify these tickets",
               "Summarize each function", "Extract the imports"):
         assert explain(p)["free"], p
+
+
+# --------------------------------------------------------------------------
+# The CLI must be decoded as UTF-8, not as the locale encoding
+# --------------------------------------------------------------------------
+
+def test_cli_output_is_decoded_as_utf8(monkeypatch):
+    """text=True alone decodes with the locale encoding -- cp1252 on a default
+    Windows box -- while the claude CLI emits UTF-8. That silently corrupted
+    every em dash and curly quote in a delivered answer, seen in the wild as
+    an em dash arriving as three mojibake characters."""
+    import subprocess
+
+    from ladder.engines.cli_engine import ClaudeCliEngine
+
+    seen = {}
+    payload = '{"result": "an em dash \u2014 and a curly quote \u201cx\u201d", "usage": {}}'
+
+    class Proc:
+        returncode = 0
+        stdout = payload
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return Proc()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    res = ClaudeCliEngine().run(tiers.by_rung(1), "sys", "prompt")
+
+    assert seen.get("encoding") == "utf-8", "must not fall back to the locale encoding"
+    assert seen.get("errors") == "replace", "a stray byte must not kill the job"
+    assert "\u2014" in res.text and "\u201c" in res.text

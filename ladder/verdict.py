@@ -222,9 +222,10 @@ def render(report: dict, assessment: dict) -> str:
             "  SPECULATION  (local drafts checked in bulk by a paid tier)",
             f"    drafts accepted      {spec['accepted']} of {spec['total']}  "
             f"({spec['acceptance']:.0%} acceptance)",
-            f"    generated locally    {_fmt_tokens(spec['local_tokens'])} of "
-            f"{_fmt_tokens(spec['local_tokens'] + spec['paid_tokens'])} tokens  "
-            f"({spec['local_share']:.0%} local)",
+            f"    answer text written  {spec['local_share']:.0%} by the free "
+            f"model ({spec.get('local_chars', 0):,} of "
+            f"{spec.get('local_chars', 0) + spec.get('paid_chars', 0):,} chars "
+            f"delivered)",
         ]
         # Acceptance and local share answer different questions, and the gap
         # between them is where the interesting cases hide: high acceptance

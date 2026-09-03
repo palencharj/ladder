@@ -129,11 +129,20 @@ class Speculation:
     unverified: int = 0
     draft_seconds: float = 0.0
     verify_seconds: float = 0.0
-    # Output tokens by who generated them. This is the metric that matters:
-    # the goal is not "fewer tasks paid for" but "more of the total generation
-    # happening on hardware we already own".
+    # Engine-reported output tokens. Used for the allowance figure only: the
+    # two engines do not count the same thing, so these must NOT be compared
+    # against each other (the CLI reported 1,486 output tokens for a 1,047
+    # character answer -- roughly 5x the visible text -- because its number
+    # carries harness overhead that Ollama's eval_count does not).
     local_tokens: int = 0
     paid_tokens: int = 0
+    # Characters of *delivered* answer, by author. Same yardstick on both
+    # sides, so the ratio means something. Verification output is deliberately
+    # excluded: it is overhead, already counted in the allowance figure, and
+    # counting it here as well is what made the first version of this metric
+    # meaningless.
+    local_chars: int = 0
+    paid_chars: int = 0
     by_kind: dict[str, list[int]] = field(default_factory=dict)  # kind -> [acc, tot]
 
     @property
@@ -148,15 +157,20 @@ class Speculation:
 
     @property
     def local_share(self) -> float:
-        """Fraction of all generated output tokens that came off the free box.
+        """Fraction of the DELIVERED answer text written by the free model.
 
-        The direct analogue of the draft model's token share in speculative
-        decoding, and the honest headline number for this system: deflection
-        counts whole tasks, which flatters a run where the local model answered
-        ten trivial questions and the paid tier wrote the one long answer.
+        The analogue of the draft model's token share in speculative decoding,
+        and a better headline than deflection, which counts whole tasks and so
+        flatters a run where rung 0 answered ten trivial questions while the
+        paid tier wrote the one long answer.
+
+        Measured in characters because that is the only yardstick both engines
+        report identically. Verification output is excluded on purpose: nobody
+        receives it, it is overhead rather than authorship, and it already
+        appears in the allowance figure.
         """
-        total = self.local_tokens + self.paid_tokens
-        return (self.local_tokens / total) if total else 0.0
+        total = self.local_chars + self.paid_chars
+        return (self.local_chars / total) if total else 0.0
 
     @property
     def naive_calls(self) -> int:
@@ -181,6 +195,8 @@ class Speculation:
             "unverified": self.unverified,
             "acceptance": round(self.acceptance, 3),
             "local_share": round(self.local_share, 3),
+            "local_chars": self.local_chars,
+            "paid_chars": self.paid_chars,
             "local_tokens": self.local_tokens,
             "paid_tokens": self.paid_tokens,
             "verify_calls": self.verify_calls,
@@ -434,6 +450,7 @@ class Speculator:
                 res.ok = False
                 res.error = "failed verify check after repair"
             spec.paid_tokens += res.tokens_out
+            spec.paid_chars += len(res.text or "")
 
             # Repairs go through the engine directly rather than run_job, so
             # nothing would record them without this -- and an invisible paid
@@ -519,6 +536,7 @@ class Speculator:
             # rejected one was regenerated at the paid tier, so counting it
             # would inflate the share with work that got thrown away.
             spec.local_tokens += d.tokens_out
+            spec.local_chars += len(d.text)
             self._record(d, accepted=True, reason=reason, final=d.text,
                          rung=rung, paid_tokens=d.verify_tokens)
             results.append({

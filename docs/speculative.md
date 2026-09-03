@@ -79,17 +79,41 @@ It also removes the shared-output-budget failure. `run_batch` clamps
 `max_tokens × N` to 32k; overrun loses the entire batch. Verdicts need ~200
 tokens each, so that ceiling stops mattering.
 
-### The number that did not flatter
+### How much of the writing stays local
 
-Local generation share came out at **4%** — 183 local tokens against 4,392
-paid. The verifier's justifications outweighed the drafts, because each answer
-was a word or a sentence. The invocation saving was real regardless (4,392
-tokens is noise against 35,000 of overhead), but it means:
+**87% of delivered answer text**, across 14 drafts at 93% acceptance.
 
-- For **short answers**, judge by invocation count.
-- For **long answers**, local share is the honest metric, and it is where the
-  real win lives — the local box writes the bulk of the text and the paid tier
-  only says yes.
+That number was wrong twice before it was right, and the corrections are worth
+recording because both were measurement faults rather than system faults.
+
+The first version compared Ollama's `eval_count` — real generated tokens —
+against the CLI's `output_tokens`, which carries harness overhead: a
+1,047-character answer came back reported as **1,486 output tokens**, roughly
+5× the visible text. Two engines counting different things, divided by each
+other. It reported 4%.
+
+The second fault was conceptual. Verification output was counted as paid
+*authorship*, but nobody receives a verdict — it is overhead, and it already
+appears in the allowance figure. Counting it twice punished the local model for
+being checked.
+
+So the metric is now: **the fraction of delivered answer text written by the
+free model, measured in characters on both sides.** An accepted draft was
+written locally; a rejected one was rewritten by the paid tier. Verdicts count
+in neither.
+
+Per kind, from real runs:
+
+| kind | drafts | accepted | local share of delivered text |
+|---|---|---|---|
+| doc | 3 | 67% | 68% |
+| summarize | 2 | 100% | 100% |
+| classify | 2 | 100% | 100% |
+| (others, 1 each) | 6 | 100% | 100% |
+
+The single rejected draft cost 1,047 characters of paid rewriting against
+2,235 written locally — even the failure case leaves most of the writing on the
+free box.
 
 ## Where it does not belong
 
@@ -133,6 +157,15 @@ ladder_spec(tasks=[{"prompt": "..."}, {"prompt": "..."}])
 `kind` is optional; it is inferred from the prompt text, so a caller needs no
 knowledge of the tier taxonomy. `ladder_route(prompts=[...])` shows where
 something would go without running it.
+
+**One caveat found in use.** Inference reads the *whole* prompt, quoted
+examples included. A task asking for documentation *about* debugging — one
+containing the sentence "write a docstring explaining why this bug happens" as
+an illustration — is classified `debug`, because that is exactly what the text
+says. The draft still happens on rung 0 either way, but `verify_rung` defaults
+to the dearest rung the tasks imply, so a mis-inferred batch gets verified at
+rung 3 instead of rung 1. Pass `verify_rung` explicitly when the prompts
+discuss other kinds of work.
 
 Warm the model first for anything sizeable — a cold 18 GB model costs ~30 s to
 page in against ~0.3 s warm:

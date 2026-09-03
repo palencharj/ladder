@@ -173,6 +173,12 @@ class ClaudeCliEngine(Engine):
             with Timer() as t:
                 proc = subprocess.run(
                     cmd, capture_output=True, text=True,
+                    # text=True alone decodes with the *locale* encoding, which
+                    # is cp1252 on a default Windows box. The CLI emits UTF-8,
+                    # so every em dash and curly quote came back corrupted --
+                    # silently, in the delivered answer, not just in a log.
+                    # errors="replace" keeps a stray byte from killing the job.
+                    encoding="utf-8", errors="replace",
                     timeout=self.timeout, cwd=self.cwd,
                 )
         except subprocess.TimeoutExpired:

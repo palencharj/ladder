@@ -320,22 +320,34 @@ class Store:
             where = "WHERE created_at >= ?"
             params.append(time.time() - days * 86400)
 
+        # local/paid chars measure the DELIVERED answer by author, using the
+        # same yardstick on both sides. An accepted row was written by the
+        # local model; a rejected one was rewritten by the paid tier, so its
+        # draft was discarded and does not count as local output.
         rows = self._rows(
             f"""SELECT kind,
                        COUNT(*)                AS n,
                        SUM(accepted)           AS accepted,
                        SUM(draft_tokens)       AS draft_tokens,
-                       SUM(paid_tokens)        AS paid_tokens
+                       SUM(paid_tokens)        AS paid_tokens,
+                       SUM(CASE WHEN accepted = 1
+                                THEN LENGTH(COALESCE(draft, '')) ELSE 0 END)
+                                               AS local_chars,
+                       SUM(CASE WHEN accepted = 0
+                                THEN LENGTH(COALESCE(final, '')) ELSE 0 END)
+                                               AS paid_chars
                 FROM speculations {where}
                 GROUP BY kind ORDER BY n DESC""",
             tuple(params),
         )
-        total = {"n": 0, "accepted": 0, "draft_tokens": 0, "paid_tokens": 0}
+        total = {"n": 0, "accepted": 0, "draft_tokens": 0, "paid_tokens": 0,
+                 "local_chars": 0, "paid_chars": 0}
         by_kind = []
         for r in rows:
             for k in total:
                 total[k] += r[k] or 0
             n, acc = r["n"] or 0, r["accepted"] or 0
+            local_ch, paid_ch = r["local_chars"] or 0, r["paid_chars"] or 0
             by_kind.append({
                 "kind": r["kind"],
                 "n": n,
@@ -343,16 +355,22 @@ class Store:
                 "acceptance": (acc / n) if n else 0.0,
                 "draft_tokens": r["draft_tokens"] or 0,
                 "paid_tokens": r["paid_tokens"] or 0,
+                "local_chars": local_ch,
+                "paid_chars": paid_ch,
+                "local_share": (local_ch / (local_ch + paid_ch))
+                               if (local_ch + paid_ch) else 0.0,
             })
 
-        generated = total["draft_tokens"] + total["paid_tokens"]
+        written = total["local_chars"] + total["paid_chars"]
         return {
             "total": total["n"],
             "accepted": total["accepted"],
             "acceptance": (total["accepted"] / total["n"]) if total["n"] else 0.0,
             "local_tokens": total["draft_tokens"],
             "paid_tokens": total["paid_tokens"],
-            "local_share": (total["draft_tokens"] / generated) if generated else 0.0,
+            "local_chars": total["local_chars"],
+            "paid_chars": total["paid_chars"],
+            "local_share": (total["local_chars"] / written) if written else 0.0,
             "by_kind": by_kind,
         }
 

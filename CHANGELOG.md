@@ -37,6 +37,19 @@ written by four tasks batched into a single `claude -p` invocation.
 
 ### Fixed
 
+- **The CLI's output was decoded with the locale encoding.** `subprocess.run`
+  with `text=True` and no `encoding=` uses `locale.getpreferredencoding()`,
+  which is `cp1252` on a default Windows box, while the `claude` CLI emits
+  UTF-8. Every em dash, curly quote and accented character in a *delivered
+  answer* was silently corrupted — not just in logs. Found when a repaired
+  documentation section came back containing mojibake.
+- **`local_share` was measuring two different things and dividing them.** It
+  compared Ollama's `eval_count` against the CLI's `output_tokens`, which
+  carries harness overhead — a 1,047-character answer was reported as 1,486
+  output tokens. It also counted verification output as paid authorship, though
+  nobody receives a verdict. Redefined as the fraction of *delivered answer
+  text* written by the free model, in characters on both sides. The real figure
+  is **87%**, not the 4% first reported.
 - Drafting swallowed exceptions. A future whose result is never requested hides
   its exception, so a task that raised vanished entirely — no draft, no
   rejection, no result. Now it fails visibly and goes to the repair pass.

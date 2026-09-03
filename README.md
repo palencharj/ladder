@@ -185,6 +185,12 @@ the same shape, so speculation does not bucket at all.
 It costs about **2× the wall clock** — drafting comes first and local
 generation is slow. You are buying allowance, not speed.
 
+Across real runs since, **87% of delivered answer text was written by the free
+model** at 93% acceptance. An earlier version of that metric reported 4%; it
+was comparing Ollama's token counts against the CLI's, which include harness
+overhead, and counting verification output as authorship. Both are fixed — see
+[docs/speculative.md](docs/speculative.md).
+
 Do not speculate on judgement work. Asked to review a file for correctness
 bugs at rung 0, the local model returned a summary with emoji headings, found
 none of the two real bugs, and stated two false things about the code. The
