@@ -133,6 +133,44 @@ a run where every draft loses costs *more* than going straight to the paid
 tier. Watch the acceptance rate per kind in `ladder_report` and stop
 speculating on kinds that sit near zero.
 
+## The verifier grades what it can check
+
+The sharpest limit in practice, found on the first real run and worth more
+attention than the token arithmetic.
+
+A draft documenting `ladder_route` was **accepted** by the rung-1 verifier. It
+contained a command-line syntax that does not exist, and an example output with
+invented field values — `rung: basic_qa`, `rung: advanced_tutorial`,
+`task_kind: information_request`. None of those are real; the rungs are 0–5 and
+named `local`, `haiku`, `sonnet`. The example prompts were about the capital of
+France.
+
+The adjudicator is already told to "verify any arithmetic, counting, or factual
+claim yourself rather than assuming it is right" and to "answer FAIL if unsure".
+It passed the draft anyway — not from carelessness, but because **it had no
+ground truth to check against.** Handed a task and an answer and nothing else,
+a judge can confirm that the section has the right heading, a table with the
+right columns, and an example in the right place. It cannot know that the
+example is fiction.
+
+So: **accepted means checked, not correct.** The guarantee is only ever as
+strong as what the verifier was given.
+
+Two ways to make it stronger, in order of preference:
+
+1. **Put the ground truth in the prompt.** Paste the real signature, the real
+   schema, the real output. Then the verifier has something to check against
+   and the verdict becomes factual rather than structural. This is also the
+   fix for the draft itself — the local model invented the syntax because
+   nothing told it the real one.
+2. **Do not speculate on facts the verifier cannot reach.** Anything whose
+   correctness depends on knowledge outside the prompt — real API shapes,
+   current behaviour of a system, anything the model would otherwise guess —
+   is not a speculation candidate, however mechanical the writing looks.
+
+The corollary, stated plainly: skim accepted output when it makes factual
+claims. Speculation buys you the volume of work, not the last mile of review.
+
 ## The flywheel
 
 Every speculation writes a row to the `speculations` table: the task, the

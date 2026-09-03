@@ -50,6 +50,22 @@ So refuse, and say why, when the work is:
   slow.
 - **A single item** — nothing to amortise. Say so and hand it back.
 
+## Give the verifier something to check against
+
+A draft is accepted on the verifier's say-so, and the verifier sees only the
+task and the answer. Given nothing else it can confirm the shape of an answer
+but not its facts. Measured: a draft documenting a tool was accepted while
+containing a command-line syntax that does not exist and invented field values,
+because nothing in the prompt said what the real ones were.
+
+So when a task asks for anything factual — an API shape, a signature, a config
+key, real output — **paste the ground truth into the prompt**. It fixes both
+ends at once: the local model stops inventing, and the verdict becomes factual
+instead of structural.
+
+If you cannot supply the ground truth, that work is not a speculation
+candidate, however mechanical the writing looks. Say so and hand it back.
+
 ## Honesty rules
 
 - Never present an unverified draft as checked. `ladder_spec` marks accepted
