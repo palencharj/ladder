@@ -61,7 +61,12 @@ because nothing in the prompt said what the real ones were.
 So when a task asks for anything factual — an API shape, a signature, a config
 key, real output — **paste the ground truth into the prompt**. It fixes both
 ends at once: the local model stops inventing, and the verdict becomes factual
-instead of structural.
+instead of structural. Measured on the same six tasks run twice: acceptance
+83% -> 100%, paid invocations 2 -> 1, fabricated drafts 1 -> 0.
+
+**Never ask for a "plausible example"** of anything you have not specified.
+That is a request to fabricate and it will be granted — it is exactly how the
+one bad draft happened.
 
 If you cannot supply the ground truth, that work is not a speculation
 candidate, however mechanical the writing looks. Say so and hand it back.

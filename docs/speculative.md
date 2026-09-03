@@ -156,17 +156,50 @@ example is fiction.
 So: **accepted means checked, not correct.** The guarantee is only ever as
 strong as what the verifier was given.
 
-Two ways to make it stronger, in order of preference:
+### The experiment
 
-1. **Put the ground truth in the prompt.** Paste the real signature, the real
-   schema, the real output. Then the verifier has something to check against
-   and the verdict becomes factual rather than structural. This is also the
-   fix for the draft itself — the local model invented the syntax because
-   nothing told it the real one.
-2. **Do not speculate on facts the verifier cannot reach.** Anything whose
-   correctness depends on knowledge outside the prompt — real API shapes,
-   current behaviour of a system, anything the model would otherwise guess —
-   is not a speculation candidate, however mechanical the writing looks.
+The natural comparison was already inside that batch. Two tasks in it asked for
+tool reference documentation. For one, the prompt listed all seven parameters
+and their defaults. For the other, the prompt said *"include a plausible example
+of the returned lines"* — asking for output that was never specified.
+
+The first came back **completely accurate**. The second invented everything.
+The local model did exactly what it was told in both cases; the difference was
+entirely in the prompt.
+
+So the same six tasks were re-run with real ground truth pasted in — actual
+parameter lists, the real rung names, and a verbatim transcript of real output
+instead of a request for a plausible one. Same task set, same `verify_rung`, one
+variable changed.
+
+| | control (no ground truth) | treatment (ground truth) |
+|---|---|---|
+| tasks | 6 | 6 |
+| accepted | 5 (**83%**) | 6 (**100%**) |
+| paid invocations | 2 | **1** |
+| fabricated content | **1 draft** | **0** |
+| delivered text written locally | 86% | **100%** |
+
+Every invented token from the control run was gone, and the real transcript was
+reproduced verbatim. All six drafts were then audited against the real kind
+names, rung names and parameter list; none contained an invented one.
+
+Note what the acceptance rate alone would have hidden. The control run scored
+83% — respectable — while silently shipping a fabricated command-line syntax.
+**Acceptance measures whether the verifier objected, not whether the answer is
+true**, and those come apart precisely when the verifier has nothing to check
+against.
+
+### The rule
+
+1. **Put the ground truth in the prompt.** Paste the real signature, schema, or
+   output. It fixes both ends at once: the local model stops inventing, and the
+   verdict becomes factual rather than structural.
+2. **Never ask for a "plausible" or "example" anything** you have not specified.
+   That is a request to fabricate, and it will be granted.
+3. **Do not speculate on facts the verifier cannot reach.** Where ground truth
+   cannot be supplied, the work is not a speculation candidate however
+   mechanical the writing looks.
 
 The corollary, stated plainly: skim accepted output when it makes factual
 claims. Speculation buys you the volume of work, not the last mile of review.
