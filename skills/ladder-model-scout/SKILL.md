@@ -49,9 +49,29 @@ is the wrong trade at any speed.
 
 How to spot one: the model card mentions reasoning or thinking modes; a response
 carries a `thinking` field beside `content`; or a short prompt returns
-`done_reason: "length"` with `content` empty. Check for this **before** running
-a full A/B — and if you do test one, give it a budget in the thousands, or the
-comparison measures your token cap rather than the model.
+`done_reason: "length"` with `content` empty. Send `"hi"` with a tiny budget as
+the very first call — a reasoning model emits thinking even for that.
+
+**But do not reject it there. Try turning thinking off first.** Ollama accepts
+`"think": false` in the `/api/chat` payload, and on a hybrid model that changes
+everything. Measured 2026-09-03 on `qwen3.6:35b-a3b-coding`, same 8 tasks:
+
+| | correct | total | thinking |
+|---|---|---|---|
+| default (thinking on) | 2/8 | 285.3 s | 9,362 chars |
+| `think: false` | **8/8** | **35.7 s** | 0 |
+
+Six of the eight failures were empty answers whose budget had been consumed by
+reasoning. With thinking off the same model is accurate and 8x faster. So the
+rule is: **a reasoning model is disqualified only if its thinking cannot be
+disabled.**
+
+Two things follow. Give any reasoning model a budget in the thousands when you
+test it with thinking on, or you are measuring your token cap rather than the
+model. And if a candidate only wins with `think: false`, remember that Ladder's
+Ollama engine does not send that flag today — adopting such a model means a
+code change, and a dropped flag silently returns rung 0 to the 2/8 result.
+Count that fragility against it.
 
 ## Method
 
