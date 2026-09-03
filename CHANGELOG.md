@@ -32,6 +32,14 @@ written by four tasks batched into a single `claude -p` invocation.
   telemetry, and also a training corpus collected as a side effect of ordinary
   use: `Store.training_pairs()` returns rejected drafts paired with the answers
   that replaced them, which is the shape a draft-model fine-tune wants.
+- **Context offload** (`ladder_recall`). Answers a question from the memory
+  vault without loading the vault into the paid model's context. The local
+  model selects passages; it never writes them. Every returned character is
+  checked mechanically to appear verbatim in the file it cites, so fabrication
+  is structurally impossible rather than merely discouraged. Falls back to the
+  free search ranking when nothing verifies, so it is never worse than a
+  keyword search. Measured: 3 verified excerpts, 1,033 chars, 250 s, zero
+  allowance.
 - Claude Code integration: a `ladder-bulk` subagent, a `/ladder` slash command,
   and a routing hook that now names the speculative path.
 

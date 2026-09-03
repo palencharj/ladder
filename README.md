@@ -223,6 +223,32 @@ is the standard way to raise the acceptance rate, and the acceptance rate is
 the single number deciding how much work stays free — so using the tool builds
 the dataset that makes the tool better.
 
+## Context offload — the free model reads the archive
+
+`ladder_recall` answers a question from your memory vault **without loading the
+vault into the paid model's context**.
+
+```
+ladder_recall(question="why was nemotron rejected for rung 0")
+```
+
+The obvious version of this — have the local model read your notes and
+summarise them — is the worst possible use of a cheap model. This repo measured
+one inventing a command-line syntax that a paid verifier then approved. Pointed
+at your own notes, that failure is invisible: you called the tool precisely
+because you no longer hold the source.
+
+So **the local model never writes; it only chooses.** Every character returned
+must appear verbatim in a real file, checked mechanically against the file on
+disk, and anything that fails is dropped before you see it. Fabrication is not
+discouraged, it is impossible — there is no channel for invented text to reach
+you. A bad selection is merely an irrelevant quote, which you can see.
+
+Measured against the real vault, 3 verified excerpts totalling 1,033 characters
+in 250 s at zero allowance. The honest cost is latency, not tokens: it is for
+questions worth waiting on. Full detail, including the provenance bug found by
+its own tests: [docs/recall.md](docs/recall.md).
+
 ## The tools
 
 | Tool | What it does |
@@ -404,6 +430,7 @@ not a bug. Use rung 0 for batch work, not for anything interactive.
 ## Documentation
 
 - [docs/speculative.md](docs/speculative.md) — speculative execution: the analogy, where it breaks, and what it measured
+- [docs/recall.md](docs/recall.md) — context offload: the free model reads the archive, and cannot fabricate what it returns
 - [`ROUTING.md`](ROUTING.md) — make Ladder the default path, and what not to route
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit, and why
 - [`docs/npu.md`](docs/npu.md) — why the Intel NPU is measured, and not used
