@@ -53,14 +53,68 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The vault and its search index. Overridable so this is not welded to one
-# machine, but defaulted so the common case needs no configuration.
-VAULT = Path(os.environ.get(
-    "LADDER_VAULT",
-    r"C:\Users\palencharj\NoOneDrive\MainClaudeMemory\MainClaude"))
-SEARCH = Path(os.environ.get(
-    "LADDER_VAULT_SEARCH",
-    r"C:\Users\palencharj\NoOneDrive\MainClaudeMemory\vault-search\vault_search.py"))
+# Where the vault lives. An absolute path into one person's home directory was
+# the first version of this, which meant everyone else got "search returned
+# nothing" -- true, useless, and indistinguishable from a vault with no match.
+#
+# So: the environment wins, and otherwise we look in a few conventional places
+# relative to the user's own home. If none exist the tool says so and names the
+# variable to set, rather than pretending it searched.
+_VAULT_CANDIDATES = (
+    Path.home() / "NoOneDrive" / "MainClaudeMemory",
+    Path.home() / "MainClaudeMemory",
+    Path.home() / "Documents" / "MainClaudeMemory",
+    Path.home() / "vault",
+)
+
+
+def _discover() -> tuple[Path | None, Path | None]:
+    """Find a vault plus its search script, or (None, None).
+
+    A vault is identified by having a sibling `vault-search/vault_search.py`,
+    because that script is what makes it searchable at all. Anything without
+    one cannot be served by this tool even if it is full of notes.
+    """
+    env_vault = os.environ.get("LADDER_VAULT")
+    env_search = os.environ.get("LADDER_VAULT_SEARCH")
+    if env_vault and env_search:
+        return Path(env_vault), Path(env_search)
+
+    for root in _VAULT_CANDIDATES:
+        script = root / "vault-search" / "vault_search.py"
+        if not script.is_file():
+            continue
+        # The notes sit in a subdirectory beside the search tool -- but there
+        # may be several, and picking the first alphabetically is how you end
+        # up pointed at a 23-note template instead of a 772-note vault. Take
+        # the richest one; a real vault dwarfs a sample of it.
+        dirs = [d for d in root.iterdir()
+                if d.is_dir() and d.name != "vault-search"]
+        scored = [(len(list(d.rglob("*.md"))), d) for d in dirs]
+        scored = [(n, d) for n, d in scored if n]
+        notes = max(scored)[1] if scored else None
+        if notes:
+            return (Path(env_vault) if env_vault else notes,
+                    Path(env_search) if env_search else script)
+    if env_vault:
+        return Path(env_vault), Path(env_search) if env_search else None
+    return None, None
+
+
+_FOUND_VAULT, _FOUND_SEARCH = _discover()
+VAULT = _FOUND_VAULT or Path("")
+SEARCH = _FOUND_SEARCH or Path("")
+
+NOT_CONFIGURED = (
+    "No memory vault found. ladder_recall needs one, plus the vault-search "
+    "index that makes it searchable.\n\n"
+    "Set both of these and restart Claude Code so the MCP server picks them up:\n"
+    "  LADDER_VAULT         the directory holding your .md notes\n"
+    "  LADDER_VAULT_SEARCH  the path to vault_search.py\n\n"
+    "On Windows:  setx LADDER_VAULT \"C:\\path\\to\\notes\"\n"
+    "Elsewhere:   export LADDER_VAULT=/path/to/notes\n\n"
+    "Every other Ladder tool works without this; only recall needs a vault."
+)
 
 # How many notes the search engine offers before the model filters them.
 DEFAULT_CANDIDATES = 8
@@ -297,6 +351,11 @@ class Recaller:
         self.vault = Path(vault)
         self.search = Path(search)
 
+    def configured(self) -> bool:
+        """Is there actually a vault and a search script to use?"""
+        return (bool(str(self.vault)) and self.vault.is_dir()
+                and bool(str(self.search)) and self.search.is_file())
+
     def recall(self, question: str, k: int = DEFAULT_CANDIDATES,
                max_chars: int = DEFAULT_MAX_CHARS,
                model: str | None = None) -> Recall:
@@ -304,11 +363,16 @@ class Recaller:
         out = Recall(question=question)
         out.stale_index = index_is_stale(self.vault, self.search)
 
+        if not self.configured():
+            out.fell_back = "no vault configured"
+            out.seconds = time.perf_counter() - t0
+            return out
+
         hits = search_vault(question, k=k, search=self.search)
         out.candidates = [{key: h[key] for key in ("score", "path", "summary")}
                           for h in hits]
         if not hits:
-            out.fell_back = "search returned nothing"
+            out.fell_back = "the search returned no matching notes"
             out.seconds = time.perf_counter() - t0
             return out
 
@@ -383,6 +447,9 @@ def render(out: Recall) -> str:
             lines.append(e.quote.strip())
             lines.append("")
         return "\n".join(lines)
+
+    if out.fell_back == "no vault configured":
+        return NOT_CONFIGURED
 
     # Degraded: hand back the free search's own ranking, which is still useful
     # and costs nothing. Never silently return an empty answer.

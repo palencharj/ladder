@@ -181,11 +181,54 @@ def test_a_dead_local_model_falls_back_to_the_search_ranking(tmp_path):
     assert "local model unavailable" in text
 
 
-def test_missing_search_engine_is_reported_not_crashed(tmp_path):
+def test_an_unconfigured_vault_says_what_to_set(tmp_path):
+    """"Search returned nothing" is true, useless, and indistinguishable from a
+    vault that simply had no match. Anyone who is not the author hits this
+    first, so it has to name the variable to set."""
+    from ladder.recall import NOT_CONFIGURED
+
     out = _recaller(tmp_path).recall("anything")
     assert out.excerpts == []
-    assert out.fell_back
-    assert "search returned nothing" in out.fell_back
+    assert out.fell_back == "no vault configured"
+    text = render(out)
+    assert "LADDER_VAULT" in text
+    assert "LADDER_VAULT_SEARCH" in text
+    assert text == NOT_CONFIGURED
+
+
+def test_discovery_prefers_the_richest_vault(tmp_path, monkeypatch):
+    """Taking the first directory alphabetically is how you end up pointed at a
+    23-note template instead of a 772-note vault -- silently, with the tool
+    reporting success on the wrong corpus."""
+    import ladder.recall as R
+
+    root = tmp_path / "MainClaudeMemory"
+    (root / "vault-search").mkdir(parents=True)
+    (root / "vault-search" / "vault_search.py").write_text("x", encoding="utf-8")
+    template = root / "aaa-template"      # sorts first
+    real = root / "zzz-real"              # sorts last, but is the real one
+    template.mkdir()
+    real.mkdir()
+    (template / "one.md").write_text("t", encoding="utf-8")
+    for i in range(5):
+        (real / f"n{i}.md").write_text("r", encoding="utf-8")
+
+    monkeypatch.delenv("LADDER_VAULT", raising=False)
+    monkeypatch.delenv("LADDER_VAULT_SEARCH", raising=False)
+    monkeypatch.setattr(R, "_VAULT_CANDIDATES", (root,))
+    vault, search = R._discover()
+    assert vault == real, f"picked {vault}"
+    assert search.name == "vault_search.py"
+
+
+def test_the_environment_overrides_discovery(tmp_path, monkeypatch):
+    import ladder.recall as R
+
+    monkeypatch.setenv("LADDER_VAULT", str(tmp_path / "mine"))
+    monkeypatch.setenv("LADDER_VAULT_SEARCH", str(tmp_path / "mine" / "s.py"))
+    vault, search = R._discover()
+    assert vault == tmp_path / "mine"
+    assert search == tmp_path / "mine" / "s.py"
 
 
 def test_render_marks_excerpts_as_verified():

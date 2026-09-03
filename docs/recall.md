@@ -103,5 +103,30 @@ ladder_recall(question="why was nemotron rejected for rung 0")
 | `max_chars` | integer | Hard cap on returned text. Default 4000 — the bounded context cost is the point |
 | `model` | string | Local model override for the selection step |
 
-Configure the paths with `LADDER_VAULT` and `LADDER_VAULT_SEARCH` if your vault
-lives elsewhere.
+### Pointing it at your vault
+
+The vault is **discovered**, not hardcoded. Ladder looks for a directory
+containing `vault-search/vault_search.py` under a few conventional locations in
+your home directory, and picks the subdirectory holding the most `.md` files --
+because taking the first one alphabetically is how you end up silently pointed
+at a 23-note template instead of a 772-note vault.
+
+If discovery misses, set both variables and restart Claude Code so the MCP
+server picks them up:
+
+```powershell
+setx LADDER_VAULT "C:/Users/you/vault/notes"
+setx LADDER_VAULT_SEARCH "C:/Users/you/vault/vault-search/vault_search.py"
+```
+
+```bash
+export LADDER_VAULT=/home/you/vault/notes
+export LADDER_VAULT_SEARCH=/home/you/vault/vault-search/vault_search.py
+```
+
+An unconfigured vault says exactly that and names the variables. It does **not**
+report "search returned nothing" -- that is true, useless, and indistinguishable
+from a vault that simply had no match.
+
+**Only `ladder_recall` needs a vault.** Every other Ladder tool works without
+one.
