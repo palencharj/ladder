@@ -28,6 +28,7 @@ import json
 import re
 import sys
 import urllib.request
+from pathlib import Path
 
 OLLAMA = "http://127.0.0.1:11434"
 
@@ -72,6 +73,23 @@ def ollama_down() -> bool:
         return True
 
 
+def infer(prompt: str):
+    """Ask Ladder's own classifier where this prompt would go.
+
+    Imported lazily and defensively: this hook runs on every prompt the user
+    types, and a hook that raises is a hook that gets switched off. A missing
+    or broken Ladder checkout must degrade to the keyword signals below, not
+    to an error in the middle of someone's session.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from ladder.classify import explain
+
+        return explain(prompt)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def guidance(prompt: str) -> str | None:
     """What, if anything, is worth saying about this prompt."""
     notes: list[str] = []
@@ -96,25 +114,37 @@ def guidance(prompt: str) -> str | None:
 
     if bulk and mechanical:
         notes.append(
-            "This looks like repetitive mechanical work -- the strongest case "
-            "for Ladder. Prefer ladder_swarm with batch=true: the ~35k harness "
-            "overhead is charged per invocation, not per task, so batching is "
-            "the difference between one call and N. Add max_rung=0 to guarantee "
-            "it cannot spend allowance, or adjudicate=true if the answers have "
-            "to be right rather than merely well-formed."
+            "This is repetitive mechanical work -- the strongest case for "
+            "Ladder. Use ladder_spec (speculative execution): the free local "
+            "model drafts every answer and ONE paid call verifies the whole "
+            "batch, so cost stops scaling with the number of tasks. Measured "
+            "on 8 mixed tasks: 1 invocation against 6 for "
+            "ladder_swarm(batch=true), all answers correct. Send the whole "
+            "list in a single call -- that is where the entire saving is."
         )
     elif mechanical:
         notes.append(
-            "This looks mechanical and self-contained -- a ladder_run candidate. "
-            "The task kind picks the rung; docstring/classify/summarize/extract "
-            "start free on the local model."
+            "This looks mechanical and self-contained. One item -> ladder_run. "
+            "Several -> ladder_spec, which drafts them free and verifies them "
+            "in one paid call. The task kind is inferred from the prompt, so "
+            "no rung needs picking."
         )
     elif bulk:
         notes.append(
             "This is repetitive across many items. If each item is independent "
-            "and mechanical, ladder_swarm with batch=true does them in one "
-            "invocation instead of N. If they depend on each other, or on "
-            "judgement about the whole picture, keep it in this session."
+            "and mechanical, ladder_spec drafts them all locally and checks "
+            "them in one invocation instead of N. If they depend on each "
+            "other, or on judgement about the whole picture, keep it here -- "
+            "fan-out cannot see the whole picture, and a cheap tier's answer "
+            "on judgement work costs more to verify than it saved."
+        )
+
+    routed = infer(prompt)
+    if routed and routed["free"] and routed["matched"] and not notes:
+        notes.append(
+            f"Ladder would route this to the FREE local tier as "
+            f"kind={routed['kind']}. If it is one item, ladder_run; if several, "
+            f"ladder_spec. Neither spends subscription allowance on the draft."
         )
 
     return "\n".join(notes) if notes else None

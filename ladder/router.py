@@ -187,12 +187,23 @@ class Router:
             return verify
         return None
 
-    def _adjudicate(self, rung: int, prompt: str, answer: str) -> tuple[bool, str, float]:
+    def _adjudicate(self, rung: int, prompt: str, answer: str,
+                    fail_open: bool = True) -> tuple[bool, str, float]:
         """Ask the tier at `rung` whether `answer` actually satisfies `prompt`.
 
-        Returns (passed, reason, cost). A failed adjudication call passes by
-        default: if the checker itself is broken, escalating every job would
-        turn an infrastructure problem into a spending problem.
+        Returns (passed, reason, cost).
+
+        ``fail_open`` decides what an *unreachable checker* means, and the two
+        callers genuinely want opposite answers. For ``run_job`` an answer that
+        already passed its verifier is being double-checked, so a broken
+        adjudicator should not escalate every job in flight -- that turns an
+        infrastructure problem into a spending problem.
+
+        Speculation is the opposite case: the answer came from the cheapest
+        model and the check is the *only* thing standing behind it. Passing it
+        by default would mark unverified local output as verified, which is the
+        precise failure the mechanism exists to prevent. Those callers pass
+        ``fail_open=False`` and get the work re-run instead.
         """
         tier = tiers.by_rung(rung)
         check_prompt = (
@@ -205,12 +216,13 @@ class Router:
             max_tokens=ADJUDICATOR_MAX_TOKENS,
         )
         if not res.ok:
-            return True, f"adjudicator unavailable ({res.error[:80]})", res.cost_usd
+            return (fail_open,
+                    f"adjudicator unavailable ({res.error[:80]})", res.cost_usd)
         passed, reason = adjudication_verdict(res.text)
         return passed, reason, res.cost_usd
 
-    def adjudicate_batch(self, rung: int,
-                         pairs: list[tuple[str, str]]) -> list[tuple[bool, str]] | None:
+    def adjudicate_batch(self, rung: int, pairs: list[tuple[str, str]],
+                         usage: dict | None = None) -> list[tuple[bool, str]] | None:
         """Check many answers in ONE invocation at the tier above.
 
         Adjudication used to force a job out of its batch and into its own call,
@@ -220,6 +232,10 @@ class Router:
 
         Returns one (passed, reason) per pair, or None if the batch could not be
         trusted, in which case the caller falls back to checking individually.
+
+        ``usage``, if given, is filled with this call's token counts. Callers
+        measuring how much generation stayed local need the checker's own
+        output counted as paid, or the figure flatters itself.
         """
         if not pairs:
             return []
@@ -240,6 +256,10 @@ class Router:
                                    max_tokens=ADJUDICATOR_MAX_TOKENS)
         if results is None:
             return None
+        if usage is not None:
+            usage["tokens_out"] = sum(r.tokens_out for r in results)
+            usage["tokens_in"] = sum(r.tokens_in for r in results)
+            usage["cost_usd"] = sum(r.cost_usd for r in results)
         # A verdict that will not parse counts as a failure, matching the
         # single-answer path: never approve something we could not read.
         return [adjudication_verdict(r.text) if r.ok
@@ -459,6 +479,7 @@ class Router:
                 "engine": res.engine, "ok": res.ok, "cost_usd": res.cost_usd,
                 "latency_ms": res.latency_ms, "error": res.error,
                 "adjudication": adjudication,
+                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out,
             })
 
             if res.ok:

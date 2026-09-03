@@ -70,6 +70,38 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status  ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_swarm   ON jobs(swarm_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_att_job      ON attempts(job_id);
+
+-- One row per speculative draft: what was asked, what the free model wrote,
+-- whether the paid tier accepted it, and what was finally returned.
+--
+-- This is the telemetry the acceptance rate is computed from. It is also,
+-- deliberately, a training corpus that costs nothing to collect: accepted rows
+-- are positive examples of work the local model can already do, and rejected
+-- rows pair a bad answer with the corrected one. A draft model fine-tuned on
+-- these raises the acceptance rate, which is the single number that decides
+-- how much of the work stays free.
+CREATE TABLE IF NOT EXISTS speculations (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    swarm_id     TEXT,
+    draft_job    TEXT,
+    repair_job   TEXT,
+    kind         TEXT NOT NULL,
+    prompt       TEXT NOT NULL,
+    draft        TEXT,
+    accepted     INTEGER NOT NULL,
+    reason       TEXT,
+    final        TEXT,
+    verify_rung  INTEGER,
+    draft_model  TEXT,
+    draft_tokens INTEGER DEFAULT 0,
+    paid_tokens  INTEGER DEFAULT 0,
+    user         TEXT,
+    created_at   REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_spec_kind    ON speculations(kind);
+CREATE INDEX IF NOT EXISTS idx_spec_swarm   ON speculations(swarm_id);
+CREATE INDEX IF NOT EXISTS idx_spec_created ON speculations(created_at DESC);
 """
 
 
@@ -245,6 +277,105 @@ class Store:
             )
         return self._rows(
             "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+        )
+
+    def record_speculation(self, *, kind: str, prompt: str, draft: str,
+                           accepted: bool, reason: str = "", final: str = "",
+                           verify_rung: int = 1, swarm_id: str | None = None,
+                           draft_job: str | None = None,
+                           repair_job: str | None = None,
+                           draft_model: str = "", draft_tokens: int = 0,
+                           paid_tokens: int = 0) -> None:
+        """Record one draft-and-verdict, whichever way it went.
+
+        Rejections are as valuable as acceptances here -- more so, arguably. An
+        accepted draft says the local model can already do this kind of work; a
+        rejected one, paired with the correction, says exactly how it falls
+        short. Both are needed to tell whether a task kind belongs at rung 0,
+        and both are training data if a fine-tuned draft model is ever built.
+        """
+        self._write(
+            """INSERT INTO speculations (swarm_id, draft_job, repair_job, kind,
+                                         prompt, draft, accepted, reason, final,
+                                         verify_rung, draft_model, draft_tokens,
+                                         paid_tokens, user, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (swarm_id, draft_job, repair_job, kind, prompt, draft,
+             1 if accepted else 0, reason, final, verify_rung, draft_model,
+             draft_tokens, paid_tokens, current_user(), time.time()),
+        )
+
+    def speculation_report(self, days: int | None = None) -> dict:
+        """Acceptance rate and local generation share, overall and per kind.
+
+        Two different questions, and conflating them hides the interesting
+        case. Acceptance counts *tasks* the local model got right. Local share
+        counts *tokens* it generated. A run where rung 0 answered nine one-line
+        questions and the paid tier wrote one long file has 90% acceptance and
+        might have 20% local share -- and the token figure is the one that
+        maps onto the rate limit.
+        """
+        where, params = "", []
+        if days:
+            where = "WHERE created_at >= ?"
+            params.append(time.time() - days * 86400)
+
+        rows = self._rows(
+            f"""SELECT kind,
+                       COUNT(*)                AS n,
+                       SUM(accepted)           AS accepted,
+                       SUM(draft_tokens)       AS draft_tokens,
+                       SUM(paid_tokens)        AS paid_tokens
+                FROM speculations {where}
+                GROUP BY kind ORDER BY n DESC""",
+            tuple(params),
+        )
+        total = {"n": 0, "accepted": 0, "draft_tokens": 0, "paid_tokens": 0}
+        by_kind = []
+        for r in rows:
+            for k in total:
+                total[k] += r[k] or 0
+            n, acc = r["n"] or 0, r["accepted"] or 0
+            by_kind.append({
+                "kind": r["kind"],
+                "n": n,
+                "accepted": acc,
+                "acceptance": (acc / n) if n else 0.0,
+                "draft_tokens": r["draft_tokens"] or 0,
+                "paid_tokens": r["paid_tokens"] or 0,
+            })
+
+        generated = total["draft_tokens"] + total["paid_tokens"]
+        return {
+            "total": total["n"],
+            "accepted": total["accepted"],
+            "acceptance": (total["accepted"] / total["n"]) if total["n"] else 0.0,
+            "local_tokens": total["draft_tokens"],
+            "paid_tokens": total["paid_tokens"],
+            "local_share": (total["draft_tokens"] / generated) if generated else 0.0,
+            "by_kind": by_kind,
+        }
+
+    def training_pairs(self, kind: str | None = None,
+                       limit: int = 500) -> list[dict]:
+        """Rejected drafts paired with the answer that replaced them.
+
+        The corpus a fine-tuned draft model would learn from, in the form it
+        would learn from: the task, what the small model said, and what the
+        larger one said instead. Collected as a side effect of ordinary use --
+        no labelling pass, no separate data-gathering project.
+        """
+        clause = "WHERE accepted = 0 AND final != '' AND final IS NOT NULL"
+        params: list = []
+        if kind:
+            clause += " AND kind = ?"
+            params.append(kind)
+        params.append(limit)
+        return self._rows(
+            f"""SELECT kind, prompt, draft, final, reason, created_at
+                FROM speculations {clause}
+                ORDER BY created_at DESC LIMIT ?""",
+            tuple(params),
         )
 
     def report(self, days: int | None = None) -> dict:

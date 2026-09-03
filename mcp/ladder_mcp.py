@@ -21,8 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ladder import models as _models  # noqa: E402
 from ladder import tiers  # noqa: E402
 from ladder import verdict as _verdict  # noqa: E402
+from ladder.classify import explain as _explain_kind  # noqa: E402
+from ladder.classify import infer_kind  # noqa: E402
 from ladder.pool import Swarm, Task, TierGate  # noqa: E402
 from ladder.router import Router  # noqa: E402
+from ladder.speculate import DEFAULT_CHUNK, Speculator  # noqa: E402
 from ladder.store import Store  # noqa: E402
 
 DEFAULT_PROTOCOL = "2025-06-18"
@@ -30,6 +33,7 @@ DEFAULT_PROTOCOL = "2025-06-18"
 _store = Store()
 _router = Router(store=_store)
 _swarm = Swarm(_router, gate=TierGate())
+_spec = Speculator(_router, store=_store)
 
 
 def log(msg: str) -> None:
@@ -150,6 +154,8 @@ TOOLS = [
             "required": ["tasks"],
         },
     },
+    {'name': 'ladder_spec', 'description': 'SPECULATIVE EXECUTION -- the cheapest way to run a LIST of tasks, and the first thing to reach for on bulk mechanical work.\n\nThe free local model drafts EVERY answer, then ONE paid call checks all of them at once, and only rejected drafts are re-run (the paid tier corrects the draft rather than rewriting from scratch). Borrowed from speculative decoding: a small model proposes, a big one verifies in bulk, and verification batches where generation does not.\n\nPREFER THIS OVER ladder_swarm(batch=true). Batching can only merge tasks sharing kind, verify, max_tokens and model, so mixed work fragments into several invocations. Speculation does not care -- every verification prompt has the same shape. MEASURED on 8 real mixed tasks from this repo: 1 invocation vs 6, all 8 answers correct, ~39k tokens of allowance against ~210k.\n\nIt also removes the shared-output-budget failure: a batch of answers must fit one 32k cap or the whole batch is lost, while verdicts need ~200 tokens each.\n\nCOSTS: roughly 2x the wall clock, because drafting happens first and local generation is slow. Latency-tolerant work only.\n\nDo NOT use for a single task (nothing to amortise), for sequential work where each step depends on the last, or for judgement-heavy work like code review -- measured here, the local model answered a review request with a summary and found none of the real bugs.', 'inputSchema': {'type': 'object', 'properties': {'tasks': {'type': 'array', 'description': "Task objects. Only 'prompt' is required -- 'kind' is inferred from the text when omitted, so the caller needs no knowledge of the tier taxonomy.", 'items': {'type': 'object', 'properties': {'prompt': {'type': 'string'}, 'kind': {'type': 'string'}, 'title': {'type': 'string'}, 'verify': {'type': 'string'}, 'max_tokens': {'type': 'integer'}, 'system_extra': {'type': 'string'}}, 'required': ['prompt']}}, 'verify_rung': {'type': 'integer', 'description': 'Which tier checks the drafts. Omit to use the dearest rung the tasks themselves imply -- verifying below that approves answers the real target might have rejected. 1 (haiku) is the cheap default and is usually enough.'}, 'kind': {'type': 'string', 'description': 'Default kind for tasks that do not set one. Omit to infer per task from the prompt text.'}, 'draft_model': {'type': 'string', 'description': 'Local model to draft with. Defaults to the rung-0 model.'}, 'chunk': {'type': 'integer', 'description': 'Drafts per verification call. Default 12. Larger is cheaper -- yield is linear in chunk size, unlike real speculative decoding where it saturates -- but the verify prompt must hold every draft.'}, 'max_tokens': {'type': 'integer', 'description': 'Default output cap per task. Default 8000.'}, 'pipeline': {'type': 'boolean', 'description': 'Draft the next chunk while the current one is verified. Default true; the local box is otherwise idle for the whole round trip.'}}, 'required': ['tasks']}},
+    {'name': 'ladder_route', 'description': 'Ask where prompts WOULD go, without running them. Returns the inferred task kind, the rung, and whether it is free. Use it when unsure whether something belongs on the local tier, or to explain the routing to someone. Costs nothing and calls no model.', 'inputSchema': {'type': 'object', 'properties': {'prompts': {'type': 'array', 'items': {'type': 'string'}, 'description': 'One or more prompts to classify.'}}, 'required': ['prompts']}},
     {
         "name": "ladder_review",
         "description": (
@@ -384,6 +390,88 @@ def t_swarm(args: dict) -> dict:
     return {"text": "\n".join(lines)}
 
 
+def t_spec(args: dict) -> dict:
+    raw = args.get("tasks") or []
+    default_kind = args.get("kind")
+    tasks = [
+        Task(
+            prompt=t["prompt"],
+            # Inference is per task, not per call: a mixed list is exactly what
+            # speculation is best at, so forcing one kind across it would throw
+            # away the advantage.
+            kind=t.get("kind") or default_kind or infer_kind(t["prompt"]),
+            title=t.get("title", ""),
+            verify=t.get("verify"),
+            max_tokens=int(t.get("max_tokens", args.get("max_tokens", 8000))),
+            system_extra=t.get("system_extra", ""),
+        )
+        for t in raw if t.get("prompt")
+    ]
+    if not tasks:
+        return {"text": "No tasks with a prompt were supplied."}
+    if len(tasks) < 2:
+        return {"text": (
+            "Speculation needs at least 2 tasks -- its whole saving is spreading "
+            "one verification call across many drafts. Use ladder_run for one."
+        )}
+
+    out = _spec.run(
+        tasks,
+        verify_rung=args.get("verify_rung"),
+        draft_model=args.get("draft_model"),
+        chunk=int(args.get("chunk", DEFAULT_CHUNK)),
+        pipeline=bool(args.get("pipeline", True)),
+    )
+    sp = out["spec"]
+    lines = [
+        "speculative run {}: {}/{} drafts accepted by {} (rung {})".format(
+            out["swarm_id"], sp["accepted"], sp["drafted"],
+            out["verify_tier"], out["verify_rung"]),
+        "  paid invocations: {} ({} verify + {} repair) vs {} unbatched".format(
+            sp["paid_calls"], sp["verify_calls"], sp["repair_calls"],
+            sp["naive_calls"]),
+        "  acceptance {:.0%} | allowance preserved ~{:,} tokens".format(
+            sp["acceptance"], sp["tokens_saved"]),
+        "  generated tokens: {:,} local / {:,} paid ({:.0%} local)".format(
+            sp["local_tokens"], sp["paid_tokens"], sp["local_share"]),
+        "  draft {:.0f}s, verify {:.0f}s".format(
+            sp["draft_seconds"], sp["verify_seconds"]),
+    ]
+    if sp["draft_failed"] or sp["unverified"]:
+        lines.append(
+            "  draft failures {}, unverified {} (both re-run at the paid tier)"
+            .format(sp["draft_failed"], sp["unverified"]))
+    if out.get("telemetry_errors"):
+        lines.append("  TELEMETRY NOT RECORDED: {}".format(
+            out["telemetry_errors"][:2]))
+    lines.append("")
+
+    for r in out["results"]:
+        mark = "local" if r.get("speculative") else "rung {}".format(
+            r.get("rung", "?"))
+        flag = "ok  " if r.get("ok") else "FAIL"
+        lines.append("[{}|{:>6}] {}".format(flag, mark, (r.get("title") or "")[:66]))
+        body = r.get("result") or r.get("error", "")
+        lines.append("    " + body[:700].replace(chr(10), chr(10) + "    "))
+        lines.append("")
+    return {"text": chr(10).join(lines)}
+
+
+def t_route(args: dict) -> dict:
+    prompts = args.get("prompts") or []
+    if not prompts:
+        return {"text": "No prompts given."}
+    lines = []
+    for pr in prompts:
+        e = _explain_kind(pr)
+        where = ("FREE (local)" if e["free"]
+                 else "rung {} ({})".format(e["rung"], e["tier"]))
+        note = "" if e["matched"] else "  [no pattern matched; using the default]"
+        lines.append("{:<20} kind={:<15} {}{}".format(
+            where, e["kind"], pr[:60], note))
+    return {"text": chr(10).join(lines)}
+
+
 def t_review(args: dict) -> dict:
     paths = args.get("paths") or []
     rung = args.get("rung", tiers.TASK_RUNGS["review"])
@@ -496,6 +584,7 @@ def t_stats(_args: dict) -> dict:
 
 def t_report(args: dict) -> dict:
     rep = _store.report(days=args.get("days"))
+    rep["speculation"] = _store.speculation_report(days=args.get("days"))
     health = _router.health()
     assessment = _verdict.assess(
         rep, using_cli_fallback=health["effective_paid_engine"] == "cli")
@@ -589,6 +678,8 @@ HANDLERS = {
     "ladder_tiers": t_tiers,
     "ladder_run": t_run,
     "ladder_swarm": t_swarm,
+    "ladder_spec": t_spec,
+    "ladder_route": t_route,
     "ladder_review": t_review,
     "ladder_status": t_status,
     "ladder_stats": t_stats,

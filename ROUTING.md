@@ -55,9 +55,23 @@ below. Route **by default** — do not wait to be asked.
   jobs is a swarm; one is not.
 - **Latency-tolerant** — nobody is watching the cursor blink.
 
-Use `ladder_swarm` with `batch: true` for anything repetitive. The paid tiers
-charge ~35k tokens of harness overhead **per invocation**, so ten batched tasks
-cost that once instead of ten times.
+Use `ladder_spec` for anything repetitive. It is the cheapest path and should
+be the reflex.
+
+**What it does.** The free local model drafts every answer; ONE paid call
+checks all the drafts at once; only the rejected ones are re-run, and those are
+*corrected* from the draft rather than rewritten. Borrowed from speculative
+decoding, and it works for the same reason: verification batches where
+generation does not.
+
+**Why not `ladder_swarm(batch: true)`.** Batching can only merge tasks that
+share kind, verify, max_tokens and model, so mixed work fragments into one
+invocation per bucket. Speculation does not bucket — every verification prompt
+has the same shape. Measured on 8 real mixed tasks: **1 invocation against 6,
+all 8 answers correct, ~39k tokens of allowance against ~210k.**
+
+Batching is still right when the tasks really are uniform and you want the
+answers written by the paid tier rather than merely checked by it.
 
 **Keep it in the main session when the work is:**
 
@@ -79,10 +93,15 @@ to a cheap tier produces work that has to be redone.
 Let the task kind pick the tier. It is right most of the time:
 
 ```
-ladder_run(prompt="...", kind="docstring")        # free, local
-ladder_swarm(tasks=[...], kind="classify", batch=true)
-ladder_review(paths=["a.py","b.py"])              # one job per file
+ladder_spec(tasks=[{"prompt": "..."}, {"prompt": "..."}])   # <- the default
+ladder_run(prompt="...", kind="docstring")                  # one item, free
+ladder_route(prompts=["..."])                               # where would this go?
+ladder_review(paths=["a.py","b.py"])                        # one job per file
 ```
+
+`kind` is optional everywhere — it is inferred from the prompt text, so nobody
+needs to learn the tier taxonomy to get work routed cheaply. `ladder_route`
+answers "where would this go" for free, without calling any model.
 
 Overrides worth knowing:
 
@@ -139,6 +158,14 @@ the whole picture, not ten workers holding fragments.
 It was right. Ladder's value is real but bounded: it deflects **bulk mechanical
 work** off the paid path. Sending precision work through it produces output you
 have to re-verify line by line, which costs more than doing it inline.
+
+Measured since, and worth knowing before trusting rung 0 with judgement: asked
+to review a 500-line file for correctness bugs, the local model returned a
+summary with emoji headings, found **none** of the two real bugs a careful read
+found, and stated two false things about the code. Speculation's verifier would
+have rejected that draft — but a run where every draft is rejected costs *more*
+than going straight to the paid tier. Check the per-kind acceptance rate in
+`ladder_report` and stop speculating on kinds that sit near zero.
 
 The policy above is written to fire automatically on the work that fits and
 stay silent on the work that does not. That is the whole design goal — the tool

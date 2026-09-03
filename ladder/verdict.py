@@ -215,6 +215,31 @@ def render(report: dict, assessment: dict) -> str:
             f"{_fmt_tokens(report['batch_savings_tokens'])}   "
             f"({report['paid_attempts']} tasks in {report['cli_calls']} calls)"
         )
+    spec = report.get("speculation") or {}
+    if spec.get("total"):
+        lines += [
+            "",
+            "  SPECULATION  (local drafts checked in bulk by a paid tier)",
+            f"    drafts accepted      {spec['accepted']} of {spec['total']}  "
+            f"({spec['acceptance']:.0%} acceptance)",
+            f"    generated locally    {_fmt_tokens(spec['local_tokens'])} of "
+            f"{_fmt_tokens(spec['local_tokens'] + spec['paid_tokens'])} tokens  "
+            f"({spec['local_share']:.0%} local)",
+        ]
+        # Acceptance and local share answer different questions, and the gap
+        # between them is where the interesting cases hide: high acceptance
+        # with a low local share means rung 0 handled many small things while
+        # the paid tier still wrote all the long ones.
+        weak = [k for k in spec.get("by_kind", [])
+                if k["n"] >= 3 and k["acceptance"] < 0.5]
+        if weak:
+            names = ", ".join(
+                f"{k['kind']} ({k['acceptance']:.0%} of {k['n']})" for k in weak[:4])
+            lines.append(f"    rarely accepted      {names}")
+            lines.append("                         -- stop speculating on these; "
+                         "the verify call is pure overhead when the draft "
+                         "always loses")
+
     lines += [
         "",
         "  WHAT IT COST",

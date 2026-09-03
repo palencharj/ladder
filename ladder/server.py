@@ -82,6 +82,7 @@ def create_app(db_path: str | None = None, cwd: str | None = None) -> Flask:
     def report():
         days = request.args.get("days", type=int)
         rep = store.report(days=days)
+        rep["speculation"] = store.speculation_report(days=days)
         health = router.health()
         rep["assessment"] = verdict.assess(
             rep, using_cli_fallback=health["effective_paid_engine"] == "cli")

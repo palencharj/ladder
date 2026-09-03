@@ -156,6 +156,67 @@ Set `max_rung` equal to the starting rung and escalation is forbidden — the jo
 either succeeds cheaply or fails honestly. `max_rung: 0` guarantees a job never
 costs a cent.
 
+## Speculative execution — the cheapest path
+
+The free local model drafts **every** answer, then **one** paid call checks all
+the drafts at once, and only the rejected ones are re-run. It is speculative
+decoding's trick applied to a different bottleneck: there, a big model verifies
+K tokens in one forward pass; here, one `claude -p` call verifies K answers for
+the same ~35k of harness overhead a single answer would cost.
+
+```
+ladder_spec(tasks=[{"prompt": "..."}, {"prompt": "..."}])
+```
+
+Measured on 8 real mixed tasks from this repository:
+
+| path | paid invocations | est. allowance | wall | correct |
+|---|---|---|---|---|
+| **speculative** | **1** | **~39k** | 74.9 s | 8/8 |
+| `ladder_swarm(batch=true)` | 6 | ~210k | 38.1 s | 8/8 |
+| unbatched | 8 | ~280k | — | — |
+
+**The competitor is batching, not naive calls.** For uniform tasks
+`batch=true` is already one invocation. What speculation beats is *mixed* work:
+batching can only merge tasks sharing kind, verify, max_tokens and model, so
+eight mixed tasks fragmented into six buckets. Every verification prompt has
+the same shape, so speculation does not bucket at all.
+
+It costs about **2× the wall clock** — drafting comes first and local
+generation is slow. You are buying allowance, not speed.
+
+Do not speculate on judgement work. Asked to review a file for correctness
+bugs at rung 0, the local model returned a summary with emoji headings, found
+none of the two real bugs, and stated two false things about the code. The
+verifier catches that — but a run where every draft loses costs more than going
+straight to the paid tier. Watch the per-kind acceptance rate in
+`ladder_report`.
+
+Full detail, including where the analogy breaks: [docs/speculative.md](docs/speculative.md).
+
+### Nobody has to pick a rung
+
+`kind` is optional everywhere. It is inferred from the prompt text, with
+judgement signals beating mechanical ones — "write a docstring explaining why
+this bug happens" is debugging, not a docstring, and guessing cheap there
+produces a confident useless answer.
+
+```
+ladder_route(prompts=["Add docstrings across the package"])
+```
+
+Free, calls no model, and tells you exactly where something would land.
+
+### It builds its own training data
+
+Every speculation records the task, the draft, the verdict and the final
+answer. Accepted rows are examples of work the local model already does;
+rejected rows pair a bad answer with its correction. `Store.training_pairs()`
+returns the latter in the shape a fine-tune wants. Fine-tuning the draft model
+is the standard way to raise the acceptance rate, and the acceptance rate is
+the single number deciding how much work stays free — so using the tool builds
+the dataset that makes the tool better.
+
 ## The tools
 
 | Tool | What it does |
@@ -336,6 +397,7 @@ not a bug. Use rung 0 for batch work, not for anything interactive.
 
 ## Documentation
 
+- [docs/speculative.md](docs/speculative.md) — speculative execution: the analogy, where it breaks, and what it measured
 - [`ROUTING.md`](ROUTING.md) — make Ladder the default path, and what not to route
 - [`docs/architecture.md`](docs/architecture.md) — how the pieces fit, and why
 - [`docs/npu.md`](docs/npu.md) — why the Intel NPU is measured, and not used
