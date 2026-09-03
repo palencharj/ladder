@@ -461,6 +461,32 @@ tests/          37 tests; no network, no models, no API key
 - [Ollama](https://ollama.com) for rung 0 (optional — without it, rung 0 is unavailable and everything costs money)
 - An `ANTHROPIC_API_KEY` for cheap rungs 1–5 (optional — without it, the `claude` CLI is used at much higher cost per call)
 
+### RAM, which decides your rung-0 model
+
+The default rung-0 model is `qwen3-coder:30b` — **18.6 GB resident, so it wants
+~27 GB of free RAM** once you leave the OS its ~8 GB of headroom. This is not a
+soft requirement: a model that does not fit is *unusable*, not slow, because
+generation then pages weights from NVMe on every token, and worse for a
+mixture-of-experts model whose expert selection changes each token and turns
+that into random reads.
+
+On a smaller machine, pick a smaller model — everything else works identically:
+
+```bash
+setx LADDER_LOCAL_MODEL qwen2.5-coder:7b    # ~4.7 GB, Windows
+export LADDER_LOCAL_MODEL=qwen2.5-coder:7b  # elsewhere
+```
+
+Check what your machine can hold with `ladder_models(action="status")`, which
+reports real *available* RAM and whether the current model fits.
+
+Two things worth knowing before you blame the model for being slow. Generation
+here is **memory-bandwidth-bound**, so speed tracks *active* parameters rather
+than total size — a 30B mixture-of-experts activating ~3B runs at roughly the
+speed of a 3B dense model, and far faster than a 7B dense one. And an
+integrated GPU or NPU does not help, because it shares the very same memory
+bus; see [docs/npu.md](docs/npu.md).
+
 ## Licence
 
 MIT
