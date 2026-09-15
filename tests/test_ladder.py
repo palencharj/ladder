@@ -5,6 +5,7 @@ Engine behaviour is faked so the escalation logic itself is what gets tested.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -1261,3 +1262,32 @@ def test_available_ram_is_a_positive_number_or_none():
 
     ram = models.available_ram_gb()
     assert ram is None or ram > 0
+
+
+# --------------------------------------------------------------------------
+# CLI child inherits the MCP server's own stdin
+#
+# Ladder's MCP server holds stdin open as its JSON-RPC channel. Spawning
+# `claude -p` without an explicit stdin= hands the child that same live pipe;
+# the CLI mistakes it for piped input, waits ~3s for data that will never
+# come, and exits 1 -- reproduced at every rung, since every rung goes
+# through this one subprocess call.
+# --------------------------------------------------------------------------
+
+
+def test_cli_engine_closes_child_stdin():
+    from unittest.mock import MagicMock, patch
+
+    from ladder.engines.cli_engine import ClaudeCliEngine
+    from ladder.tiers import by_rung
+
+    engine = ClaudeCliEngine()
+    fake_proc = MagicMock(returncode=0, stdout='{"result": "ok"}', stderr="")
+
+    with patch("subprocess.run", return_value=fake_proc) as run:
+        engine.run(by_rung(1), system="sys", prompt="hi")
+
+    assert run.call_args.kwargs.get("stdin") is subprocess.DEVNULL, (
+        "cli_engine must close the child's stdin -- otherwise it inherits "
+        "the MCP server's own JSON-RPC pipe and hangs waiting for piped input"
+    )

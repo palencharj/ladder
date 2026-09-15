@@ -180,6 +180,13 @@ class ClaudeCliEngine(Engine):
                     # errors="replace" keeps a stray byte from killing the job.
                     encoding="utf-8", errors="replace",
                     timeout=self.timeout, cwd=self.cwd,
+                    # Ladder's own MCP server holds stdin open as its JSON-RPC
+                    # channel. Without this, the child `claude -p` process
+                    # inherits that live pipe, mistakes it for piped input,
+                    # waits ~3s for data that will never come (the pipe isn't
+                    # EOF, it's just not for it), and exits 1. DEVNULL gives it
+                    # an already-closed stdin so it skips that wait entirely.
+                    stdin=subprocess.DEVNULL,
                 )
         except subprocess.TimeoutExpired:
             return Result(
