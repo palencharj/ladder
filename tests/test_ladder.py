@@ -415,6 +415,61 @@ def test_a_saturated_narrow_tier_does_not_starve_a_wide_one():
     )
 
 
+def test_batched_calls_respect_the_tier_gate():
+    """The TierGate must bound batched calls, not just individual ones.
+
+    Found live: `_try_batch` called `router.run_batch` directly, never
+    touching `self.gate`. Individual tasks in `_run_one` correctly acquire
+    and release the gate, so the gap was invisible unless two swarms both
+    batched against the same rung at once -- exactly the "across simultaneous
+    swarms" case this file's own module docstring says semaphores exist for.
+
+    Two concurrent swarms, gate capped to 1, each batching 4 tasks at rung 1:
+    proven to observe 2 concurrent `run_batch` calls before the fix, 1 after.
+    """
+    import threading
+    import time
+
+    concurrent = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    class BatchingRouter:
+        def run_batch(self, chunk, swarm_id, adjudicate=False):
+            with lock:
+                concurrent["now"] += 1
+                concurrent["peak"] = max(concurrent["peak"], concurrent["now"])
+            time.sleep(0.2)  # hold the slot open long enough for overlap
+            with lock:
+                concurrent["now"] -= 1
+            return [{"ok": True, "result": f"a{i}", "cost_usd": 0.01, "title": t.title}
+                    for i, t in enumerate(chunk)]
+
+        def run_job(self, **kw):
+            return {"ok": True, "result": "x", "cost_usd": 0.0, "title": kw.get("title", "")}
+
+    gate = TierGate(overrides={1: 1})  # force the cap to 1, no ambiguity
+    router = BatchingRouter()
+
+    def make_tasks(prefix):
+        return [Task(prompt=f"{prefix}{i}", kind="classify", rung=1, title=f"{prefix}{i}")
+                for i in range(4)]
+
+    swarms = [Swarm(router, gate) for _ in range(2)]
+    threads = [
+        threading.Thread(target=s.run, args=(make_tasks(f"s{i}-"), f"swarm-{i}", True))
+        for i, s in enumerate(swarms)
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert concurrent["peak"] == 1, (
+        f"TierGate concurrency=1 but {concurrent['peak']} batched calls ran "
+        f"concurrently -- the gate is not being acquired around run_batch"
+    )
+
+
 def test_every_task_still_runs_when_partitioned_by_rung():
     """Partitioning must not drop or duplicate work."""
     eng = FakeEngine(succeed_at_rung=0)

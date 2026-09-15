@@ -112,8 +112,20 @@ class Swarm:
         return (task.kind, task.system_extra, task.verify, task.max_tokens,
                 task.model, task.rung, task.tier_name, task.adjudicate)
 
-    def _try_batch(self, group: list[Task], swarm_id: str) -> tuple[list[dict], list[Task]]:
-        """Batch what can be batched. Returns (results, tasks needing individual runs)."""
+    def _try_batch(self, rung: int, group: list[Task],
+                   swarm_id: str) -> tuple[list[dict], list[Task]]:
+        """Batch what can be batched. Returns (results, tasks needing individual runs).
+
+        Each chunk still goes through `self.gate` even though it's one
+        invocation for many tasks, not one task. The gate bounds *concurrent
+        calls to a tier*, and a batched call is still a call -- skipping the
+        gate here let two concurrent swarms fire batched calls at the same
+        rung with no cap between them at all, found by running two swarms
+        against a rung capped to concurrency=1 and observing 2 batched calls
+        in flight simultaneously. Individual tasks in `_run_one` never had
+        this gap; only the batching path did, because it was added later and
+        called `self.router.run_batch` directly.
+        """
         from .engines.cli_engine import MAX_BATCH
 
         done: list[dict] = []
@@ -136,8 +148,12 @@ class Swarm:
                 if len(chunk) < 2:
                     leftover.extend(chunk)
                     continue
-                out = self.router.run_batch(chunk, swarm_id,
-                                            adjudicate=wants_adjudication)
+                self.gate.acquire(rung)
+                try:
+                    out = self.router.run_batch(chunk, swarm_id,
+                                                adjudicate=wants_adjudication)
+                finally:
+                    self.gate.release(rung)
                 if out is None:
                     leftover.extend(chunk)   # fall back, never misalign
                 else:
@@ -149,7 +165,7 @@ class Swarm:
                      batch: bool = False) -> None:
         """Run one rung's tasks in a pool sized to that rung's budget."""
         if batch and rung > 0 and len(group) > 1:
-            batched, group = self._try_batch(group, swarm_id)
+            batched, group = self._try_batch(rung, group, swarm_id)
             if batched:
                 with lock:
                     results.extend(batched)
