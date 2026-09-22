@@ -27,57 +27,36 @@ not depend on a local path.
 
 <!-- everything below this line is the instruction Claude reads -->
 
-### Default to Ladder, local rung first (per John, 2026-09-01)
+### No local tier (per John, 2026-09-22)
 
-Goal: convenience + lower token spend. Whenever a task fits the "send to
-Ladder" profile below, route it there by default, starting at the local/free
-rung (`max_rung: 0`), without waiting to be asked.
-
-This does not override the "keep it in the main session" list below —
-precision-critical, sequential, or interactive work still stays in-session,
-because a wrong local-model result there costs more tokens to verify and redo
-than it saves. The point is to stop *hesitating* on the clear cases, not to
-force every case through Ladder.
+Ladder's rung 0 (Ollama) is **disabled**. Every Ladder job now runs on a paid
+Anthropic rung, rung 1 (Haiku) and up. Do not start or install Ollama, and do
+not ask for rung 0: `rung: 0` or `max_rung: 0` is refused with an explicit
+error rather than silently billed on a paid rung. `ladder_spec` (local drafts,
+one paid check) and `ladder_models` (Ollama model management) are refused for
+the same reason. `LADDER_ENABLE_LOCAL=1` restores the old behaviour.
 
 ### Routing work to Ladder
 
-The `ladder_*` MCP tools run tasks on the cheapest model that can do them,
-starting with a free local model. Prefer them for work that fits the profile
-below. Route **by default** — do not wait to be asked.
+With no free tier, Ladder's remaining value is **amortising the ~35k
+per-invocation overhead** of `claude -p` across many uniform items. That is a
+narrower case than before, so route to it only when it clearly fits.
 
 **Send to Ladder when the work is:**
 
-- **Mechanical and self-contained** — classification, triage, extraction,
-  summarising, docstrings, boilerplate, renaming, changelog entries, commit
-  messages.
-- **Repetitive across many items** — the same operation over a list of files,
-  functions, endpoints, or tickets. This is the strongest signal. Ten similar
-  jobs is a swarm; one is not.
+- **Repetitive across many uniform items** — the same mechanical operation
+  over a list of files, functions, endpoints, or tickets. Ten similar jobs is a
+  batch; one is not. Use `ladder_swarm(batch: true)`: it answers many
+  same-shaped tasks in one invocation instead of one each.
 - **Latency-tolerant** — nobody is watching the cursor blink.
 
-Use `ladder_spec` for anything repetitive. It is the cheapest path and should
-be the reflex.
-
-**What it does.** The free local model drafts every answer; ONE paid call
-checks all the drafts at once; only the rejected ones are re-run, and those are
-*corrected* from the draft rather than rewritten. Borrowed from speculative
-decoding, and it works for the same reason: verification batches where
-generation does not.
-
-**Why not `ladder_swarm(batch: true)`.** Batching can only merge tasks that
-share kind, verify, max_tokens and model, so mixed work fragments into one
-invocation per bucket. Speculation does not bucket — every verification prompt
-has the same shape. Measured on 8 real mixed tasks: **1 invocation against 6,
-all 8 answers correct, ~39k tokens of allowance against ~210k.**
-
-Batching is still right when the tasks really are uniform and you want the
-answers written by the paid tier rather than merely checked by it.
+A single mechanical item is not worth routing any more: it costs a whole paid
+invocation either way.
 
 **Keep it in the main session when the work is:**
 
 - **Precision-critical** — a specific edit where being subtly wrong is worse
-  than being slow. Verifying a local model's diff line by line costs more than
-  writing it.
+  than being slow.
 - **Sequential and interdependent** — each step informed by the last.
 - **Reliant on whole-context judgement** — noticing what the tests *don't*
   cover, or that an error path is missing, requires one context holding the
@@ -85,56 +64,34 @@ answers written by the paid tier rather than merely checked by it.
   confident, shallow findings.
 - **Interactive** — a person is waiting on the answer right now.
 
-That second list is not a caveat, it is half the policy. Routing precision work
-to a cheap tier produces work that has to be redone.
+That second list is not a caveat, it is half the policy.
 
 ### How to call it
 
-Let the task kind pick the tier. It is right most of the time:
-
 ```
-ladder_spec(tasks=[{"prompt": "..."}, {"prompt": "..."}])   # <- the default
-ladder_run(prompt="...", kind="docstring")                  # one item, free
-ladder_route(prompts=["..."])                               # where would this go?
-ladder_review(paths=["a.py","b.py"])                        # one job per file
+ladder_swarm(tasks=[{"prompt": "..."}, ...], batch=true)   # <- the default
+ladder_route(prompts=["..."])                              # where would this go? (no model call)
+ladder_review(paths=["a.py","b.py"])                       # one job per file
 ```
 
-`kind` is optional everywhere — it is inferred from the prompt text, so nobody
-needs to learn the tier taxonomy to get work routed cheaply. `ladder_route`
-answers "where would this go" for free, without calling any model.
+`kind` is optional everywhere — it is inferred from the prompt text.
 
 Overrides worth knowing:
 
-- `max_rung: 0` — guarantees a job cannot spend any allowance. Good for trying
-  a large batch before committing to it.
+- `max_rung` — escalation ceiling. It must be 1 or above; `max_rung: 0` is an
+  error now, because there is no free rung for it to mean.
 - `adjudicate: true` — has the next rung up check the answer is *correct*, not
-  merely well-formed. Use when a cheap tier's output has to be right. Costs one
-  small extra call, far less than running the whole task a rung higher.
+  merely well-formed.
 - `verify: "python" | "json"` — structural check only. It catches malformed
   output, never wrong output.
-- `max_tokens` — raise it for long outputs. A truncated answer is retried with
-  more budget at the same rung, but starting closer saves a round trip.
-
-### Before a large batch
-
-Warm the local model first. A cold 18 GB model costs ~33 s to page in against
-0.3 s warm, and without this the first job of a batch pays that:
-
-```
-ladder_models(action="warm")
-```
-
-`ladder_models(action="status")` shows what is resident and whether the rung-0
-model fits in available RAM. `action="unload_others"` frees everything else —
-an idle model holds its full weight in RAM for nothing.
+- `max_tokens` — raise it for long outputs.
 
 ### After a batch
 
 Call `ladder_report` occasionally. Two numbers matter:
 
-- **Deflection rate per task kind.** A kind near 0% is starting too low and
-  paying for a doomed local attempt every time — raise it in `TASK_RUNGS`. A
-  kind at 100% may be starting too high.
+- **First-try rate per task kind.** A kind that rarely passes at its
+  starting rung is starting too low — raise it in `TASK_RUNGS`.
 - **Unbatched paid tasks.** Each is its own ~35k invocation. If that climbs,
   pass `batch: true`.
 

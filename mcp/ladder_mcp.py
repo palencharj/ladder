@@ -53,16 +53,16 @@ def log(msg: str) -> None:
 # --------------------------------------------------------------------------
 
 _EFFORT_DESC = (
-    "Lowest rung to start at. 0=local (free, CPU, slow, mechanical work), "
+    "Lowest rung to start at. 0=local (DISABLED; refused unless LADDER_ENABLE_LOCAL=1), "
     "1=haiku, 2=sonnet/low, 3=sonnet/high, 4=opus, 5=fable. "
     "Omit to let the task kind choose -- that is the cheap default and is "
     "usually right."
 )
 
 _KIND_DESC = (
-    "Task kind. Sets the starting rung automatically. Rung 0: classify, triage, "
-    "docstring, boilerplate, rename, simple_edit, summarize, extract. "
-    "Rung 1: doc, readme, test, review, commit_message, changelog. "
+    "Task kind. Sets the starting rung automatically. Rung 1 (rung 0 when "
+    "LADDER_ENABLE_LOCAL=1): classify, triage, docstring, boilerplate, rename, "
+    "simple_edit, summarize, extract. Rung 1: doc, readme, test, review, commit_message, changelog. "
     "Rung 2+: implement, refactor, migrate, debug, architect."
 )
 
@@ -102,7 +102,7 @@ TOOLS = [
                 "rung": {"type": "integer", "description": _EFFORT_DESC},
                 "tier": {"type": "string", "description": "Force a tier by name (local, haiku, sonnet, sonnet-high, opus, fable). Overrides rung and kind."},
                 "model": {"type": "string", "description": "Swap the model at the starting rung only, keeping that rung's engine and pricing. Use a smaller local model for short-output work: qwen2.5-coder:3b classifies in ~4s where the 30B default takes ~30s. Escalation above the start rung uses each rung's standard model."},
-                "max_rung": {"type": "integer", "description": "Ceiling for escalation. Set to the same value as rung to forbid escalation entirely (e.g. max_rung=0 keeps a job free)."},
+                "max_rung": {"type": "integer", "description": "Ceiling for escalation. Set to the same value as rung to forbid escalation entirely. Must be >= 1: rung 0 (local) is disabled and max_rung=0 is refused."},
                 "verify": {"type": "string", "enum": ["python", "json", "nonempty"], "description": "Structural check applied to the output. On failure the job escalates one rung. 'python' means the output must parse as Python. NOTE: this checks form only, never correctness -- use adjudicate for that."},
                 "adjudicate": {"type": "boolean", "description": "Have the next rung up check the answer before accepting it. Structural verifiers catch malformed output but not WRONG output -- a small local model will return well-formed JSON with a wrong number in it and the 'json' verify passes. Adjudication costs one small call at the rung above (far less than running the whole task there) and escalates if the answer is rejected. Use it whenever a cheap tier's answer has to be right rather than merely well-formed."},
                 "system_extra": {"type": "string", "description": "Extra context appended to the system prompt, e.g. project conventions."},
@@ -288,8 +288,11 @@ def t_health(_args: dict) -> dict:
         lines.append(
             "  NOTE: each `claude -p` call carries ~35k tokens of harness "
             "overhead, charged per invocation however small the task. On a "
-            "subscription that is allowance, not money. Deflecting requests to "
-            "rung 0 is what preserves it -- see ladder_report."
+            "subscription that is allowance, not money. "
+            + ("Deflecting requests to rung 0 is what preserves it -- see "
+               "ladder_report." if tiers.LOCAL_ENABLED else
+               "With rung 0 disabled, batching (ladder_swarm batch=true) is "
+               "what preserves it.")
         )
     return {"text": "\n".join(lines), "data": h}
 
@@ -298,6 +301,8 @@ def t_tiers(_args: dict) -> dict:
     lines = ["rung  tier         engine     model                 effort  conc   $in/$out per Mtok"]
     for t in tiers.LADDER:
         price = "free" if t.engine == "ollama" else f"${t.price_in}/${t.price_out}"
+        if t.rung < tiers.MIN_RUNG:
+            price = "DISABLED (LADDER_ENABLE_LOCAL=1 restores)"
         lines.append(
             f"  {t.rung}   {t.name:<12} {t.engine:<10} {t.model:<21} "
             f"{str(t.effort or '-'):<7} {t.concurrency:<5}  {price}"
@@ -650,6 +655,8 @@ def validate_args(tool: dict, args: dict) -> str | None:
 
 
 def t_models(args: dict) -> dict:
+    if not tiers.LOCAL_ENABLED:
+        raise tiers.LocalTierDisabled("ladder_models (it manages rung 0's Ollama models)")
     action = args.get("action", "status")
     model = args.get("model") or tiers.by_rung(0).model
 

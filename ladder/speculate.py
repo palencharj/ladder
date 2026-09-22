@@ -297,6 +297,11 @@ class Speculator:
         roughly eight times slower. Fanning out here would buy nothing and
         would evict the model from RAM under contention.
         """
+        # Without a free drafter, speculation pays for the draft AND the check.
+        # Refuse, and point at the batch path that pays once.
+        if not tiers.LOCAL_ENABLED:
+            raise tiers.LocalTierDisabled(
+                "speculative drafting (use ladder_swarm with batch=true)")
         local = tiers.by_rung(0)
         width = min(len(tasks) or 1, max(1, local.concurrency))
         out: list[Drafted] = [None] * len(tasks)  # type: ignore[list-item]

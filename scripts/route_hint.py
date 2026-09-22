@@ -13,9 +13,10 @@ Two jobs:
 
 1. **Nudge on routable work.** Bulk, mechanical, latency-tolerant prompts get a
    short pointer at the right tool with the right flags.
-2. **Warn when rung 0 is down.** This is the failure that costs real allowance:
-   if Ollama is not running, every job silently becomes a paid one and nothing
-   in the UI says so. Cheap to check, expensive to miss.
+2. **Warn when rung 0 is down** -- only when the local tier is enabled
+   (LADDER_ENABLE_LOCAL=1). It is off by default, and a tier that is off on
+   purpose is not "down": no probe, no warning, and no pointer at the
+   local-draft tools.
 
 Contract: reads the hook JSON on stdin, writes JSON on stdout. Silence (empty
 output) is a valid answer and the common case -- most prompts are not routable
@@ -25,12 +26,15 @@ and deserve no interruption.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.request
 from pathlib import Path
 
 OLLAMA = "http://127.0.0.1:11434"
+# Mirrors ladder.tiers.LOCAL_ENABLED; read directly so the hook stays import-free.
+LOCAL_ENABLED = os.environ.get("LADDER_ENABLE_LOCAL", "").strip() == "1"
 
 # Work Ladder is good at. Deliberately conservative: a false nudge is noise on
 # every prompt, which is how a hook gets switched off.
@@ -95,7 +99,7 @@ def guidance(prompt: str) -> str | None:
     notes: list[str] = []
 
     # The expensive silent failure comes first, and applies regardless of shape.
-    if ollama_down():
+    if LOCAL_ENABLED and ollama_down():
         notes.append(
             "Ladder's local tier (rung 0) is DOWN -- Ollama is not responding. "
             "Every ladder job will fall through to a paid rung and spend "
@@ -110,6 +114,19 @@ def guidance(prompt: str) -> str | None:
     # Precision work beats a bulk signal: "debug every failing test" is still
     # debugging, and fanning it out produces confident shallow findings.
     if precision:
+        return "\n".join(notes) if notes else None
+
+    if not LOCAL_ENABLED:
+        # No free tier: every Ladder job is paid, and the saving left is
+        # amortising the ~35k per-invocation overhead across many items.
+        if bulk and mechanical:
+            notes.append(
+                "This is repetitive mechanical work. Ladder's local tier is "
+                "off, so every job is paid; the saving left is batching -- "
+                "ladder_swarm(batch=true) answers many uniform items in one "
+                "invocation instead of one each. A single item is not worth "
+                "routing."
+            )
         return "\n".join(notes) if notes else None
 
     if bulk and mechanical:

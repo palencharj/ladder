@@ -8,6 +8,17 @@ written by four tasks batched into a single `claude -p` invocation.
 
 ## [Unreleased]
 
+### Changed
+
+- **Rung 0 (local Ollama) is disabled by default.** Rung 1 is the floor; no job
+  is routed to Ollama and nothing probes `127.0.0.1:11434` (`ladder_health`
+  reports it disabled without connecting). An explicit `rung: 0`, `tier: local`
+  or `max_rung: 0` raises `LocalTierDisabled` instead of silently running on a
+  paid rung. `ladder_spec` and `ladder_models` refuse for the same reason. The
+  routing hook no longer warns that rung 0 is down, and `ROUTING.md` no longer
+  tells sessions to start there. `LADDER_ENABLE_LOCAL=1` restores the old
+  behaviour.
+
 ### Added
 
 - **Speculative execution** (`ladder_spec`). The free local model drafts every
