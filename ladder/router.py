@@ -166,13 +166,16 @@ class Router:
         """Report which engines are usable right now, and which paid path wins."""
         api_ok, api_msg = self._api.available()
         cli_ok, cli_msg = self._cli.available()
-        oll_ok, oll_msg = self._ollama.available()
+        if tiers.LOCAL_ENABLED:
+            oll_ok, oll_msg = self._ollama.available()
+            ollama = {"ok": oll_ok, "detail": oll_msg,
+                      "models": self._ollama.installed_models()}
+        else:
+            # Not probed at all: a disabled tier must not touch 127.0.0.1:11434.
+            ollama = {"ok": False, "models": [],
+                      "detail": "disabled (set LADDER_ENABLE_LOCAL=1 to restore)"}
         return {
-            "ollama": {
-                "ok": oll_ok,
-                "detail": oll_msg,
-                "models": self._ollama.installed_models(),
-            },
+            "ollama": ollama,
             "anthropic_api": {"ok": api_ok, "detail": api_msg},
             "claude_cli": {"ok": cli_ok, "detail": cli_msg},
             "effective_paid_engine": (
@@ -391,6 +394,8 @@ class Router:
         the standard model for each rung, because the override is a statement
         about this task, not about the ladder.
         """
+        if max_rung is not None and max_rung < tiers.MIN_RUNG:
+            raise tiers.LocalTierDisabled(f"max_rung={max_rung}")
         start_tier = tiers.resolve(kind=kind, rung=rung, tier_name=tier_name)
         if model:
             start_tier = replace(start_tier, model=model)

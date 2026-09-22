@@ -35,6 +35,26 @@ from dataclasses import dataclass
 # you expect it to generate meaningfully faster.
 DEFAULT_LOCAL_MODEL = os.environ.get("LADDER_LOCAL_MODEL", "qwen3-coder:30b")
 
+# Rung 0 is OFF by default (John, 2026-09-22: do not use Ollama). With it off,
+# rung 1 is the floor: nothing routes to Ollama, nothing probes 127.0.0.1:11434,
+# and an explicit request for rung 0 or max_rung 0 raises LocalTierDisabled
+# rather than quietly running on a paid rung. LADDER_ENABLE_LOCAL=1 restores it.
+LOCAL_ENABLED = os.environ.get("LADDER_ENABLE_LOCAL", "").strip() == "1"
+MIN_RUNG = 0 if LOCAL_ENABLED else 1
+
+
+class LocalTierDisabled(ValueError):
+    """Raised when a caller asks for rung 0 while the local tier is off."""
+
+    def __init__(self, what: str = "rung 0"):
+        super().__init__(
+            f"{what} requested, but Ladder's local tier (rung 0, Ollama) is "
+            f"disabled -- every rung that remains is paid. Refusing rather than "
+            f"charge a 'free only' request without saying so. Drop the rung-0 "
+            f"constraint to run on rung {MIN_RUNG} or above, or set "
+            f"LADDER_ENABLE_LOCAL=1 to restore the local tier."
+        )
+
 
 @dataclass(frozen=True)
 class Tier:
@@ -187,13 +207,21 @@ TASK_RUNGS: dict[str, int] = {
     "debug": 3,
     "architect": 4,
 }
+# With the local tier off, the mechanical kinds start on the floor instead.
+TASK_RUNGS = {k: max(v, MIN_RUNG) for k, v in TASK_RUNGS.items()}
 
 DEFAULT_KIND = "implement"
 
 
 def by_rung(rung: int) -> Tier:
-    """Return the tier at `rung`, clamped into range."""
+    """Return the tier at `rung`, clamped into range.
+
+    Raises LocalTierDisabled for rung 0 while the local tier is off: clamping
+    it up to rung 1 would turn an explicit "free" request into a paid one.
+    """
     rung = max(0, min(int(rung), MAX_RUNG))
+    if rung < MIN_RUNG:
+        raise LocalTierDisabled(f"rung {rung}")
     return LADDER[rung]
 
 
@@ -201,6 +229,8 @@ def by_name(name: str) -> Tier:
     """Return a tier by its short name (e.g. 'haiku'). Raises KeyError."""
     for tier in LADDER:
         if tier.name == name:
+            if tier.rung < MIN_RUNG:
+                raise LocalTierDisabled(f"tier {name!r}")
             return tier
     raise KeyError(f"no such tier: {name!r} (have: {[t.name for t in LADDER]})")
 
